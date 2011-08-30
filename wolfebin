@@ -1,0 +1,720 @@
+#!/usr/bin/env python
+
+import sys, os
+import time, struct
+import optparse
+import socket
+import hashlib
+import itertools
+python_version = sys.version_info[0]
+if python_version == 2:
+    from StringIO import StringIO
+    bytes_to_str = lambda s: s
+    str_to_bytes = lambda s: s
+elif python_version == 3:
+    from io import StringIO
+    bytes_to_str = lambda s: str(s, "utf8")
+    str_to_bytes = lambda s: bytes(s, "utf8")
+md5sum_len = len(str_to_bytes(hashlib.md5().hexdigest()))
+
+put_names = ("put", "send", "push", "p")
+put_command = "p"
+
+get_names = ("get", "receive", "pull", "g")
+get_command = "g"
+
+delete_names = ("delete", )
+delete_command = "d"
+
+list_names = ("list", "ls", "l")
+list_command = "l"
+
+install_bash_completion_names = ("install", "install-bash-completion")
+
+all_command_names = itertools.chain(put_names, get_names, list_names, install_bash_completion_names)
+
+prog = os.path.split(sys.argv[0])[1]
+usage_content = """
+%(prog)s put [-k KEY] [-n NAME] file...
+%(prog)s get [-k KEY] [-o PATH]
+%(prog)s list [-k KEY] [-v|-vv]
+sudo %(prog)s install[-bash-completion]
+%(prog)s --help\
+""" % {"prog": prog}
+usage_message = "Usage:" + usage_content
+__version__ = "4.10"
+
+# config
+server_name = "[this used to be a hard-coded server url. TODO: configurable.]"
+server_port = 55247
+chunk_size = 0x10000
+
+def open_connection():
+    actual_connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        actual_connection.connect((server_name, server_port))
+    except socket.error:
+        sys.exit("ERROR: Can't connect to the wolfebin server.")
+    return Connection(actual_connection)
+class Connection:
+    def __init__(self, actual_connection):
+        self.connection = actual_connection
+    def __del__(self):
+        self.connection.close()
+    def read(self, length):
+        chunks = []
+        while length != 0:
+            chunk = self.connection.recv(length)
+            if len(chunk) == 0:
+                break
+            chunks.append(chunk)
+            length -= len(chunk)
+        return str_to_bytes("").join(chunks)
+    def read_fmt(self, fmt):
+        data = self.read(struct.calcsize(fmt))
+        return struct.unpack(fmt, data)[0]
+    def read_int(self):
+        return self.read_fmt(">I")
+    def read_long(self):
+        return self.read_fmt(">Q")
+    def read_string(self):
+        length = self.read_int()
+        return bytes_to_str(self.read(length))
+
+    def write(self, data):
+        self.connection.sendall(data)
+    def write_fmt(self, fmt, value):
+        data = struct.pack(fmt, value)
+        self.write(data)
+    def write_int(self, value):
+        self.write_fmt(">I", value)
+    def write_long(self, value):
+        self.write_fmt(">Q", value)
+    def write_string(self, value):
+        value = str_to_bytes(value)
+        self.write_int(len(value))
+        self.write(value)
+
+    def check(self, crash_on_error=True):
+        status_code = self.read(1)
+        if status_code == str_to_bytes("w"):
+            # 'w' for "wolfebin"
+            return
+        elif status_code == str_to_bytes("b"):
+            # 'b' for "bad"
+            message = self.read_string()
+            if crash_on_error:
+                sys.exit("fatal: " + message)
+            return message
+        else:
+            # always crash in this case
+            sys.exit("fatal: corrupt network communication " + repr(status_code + self.read(0xf)))
+
+def int_to_human_binary(number):
+    """like the -h switch for du. 2408358 -> 2.3M"""
+    binary_prefixes = ["", "k", "M", "G", "T", "P", "E", "Z", "Y"]
+    for prefix in binary_prefixes:
+        if number < 1024:
+            break
+        number /= 1024.0
+    else:
+        # oops, overshot the last one (yeah right)
+        number *= 1024
+    if type(number) == float and number < 9.5:
+        number_str = "%.1f" % number
+    else:
+        number_str = str(int(number))
+    return number_str + prefix
+def int_to_human_time(seconds):
+    """0s  59m59s  99h59m  100h  1000000h"""
+    minutes = int(seconds / 60)
+    seconds = seconds % 60
+    hours = int(minutes / 60)
+    minutes = minutes % 60
+    if hours > 99:
+        return str(hours) + "h"
+    if hours > 0:
+        return str(hours) + "h" + str(minutes).zfill(2) + "m"
+    if minutes > 0:
+        return str(minutes) + "m" + str(seconds).zfill(2) + "s"
+    return str(seconds) + "s"
+
+
+# progress reporting
+def progress(thus_far, eventual_total, time_tracker, banner_text):
+    """
+    [= banner ==>         ]  %55.0  86630/188k  1.2MB/s  1m23s
+    bar                     percent fraction    speed    eta
+    """
+    # build line backwards and leave as much space as possible for the bar
+    line = ""
+
+    # eta and speed
+    eta_str = ""
+    speed_str = ""
+    if thus_far != 0:
+        if "start" not in time_tracker:
+            # delay recording the start time until we get somewhere
+            time_tracker["start"] = time.time()
+        # we have a start time
+        elapsed_time = time.time() - time_tracker["start"]
+        if elapsed_time > 1.0:
+            # report time after some amount of time has passed
+            speed = thus_far / elapsed_time
+            speed_str = int_to_human_binary(int(speed)) + "B/s"
+            eta = (eventual_total - thus_far) / speed
+            eta_str = int_to_human_time(int(eta))
+    eta_space = len("59m59s")
+    line = " " + eta_str.rjust(eta_space) + line
+    speed_space = len("1023kB/s")
+    line = " " + speed_str.rjust(speed_space) + line
+
+    # fraction
+    denominator_str = int_to_human_binary(eventual_total)
+    numerator_space = len(str(eventual_total))
+    numerator_str = str(thus_far).rjust(numerator_space)
+    line = " " + numerator_str + "/" + denominator_str + line
+
+    # percent
+    percent_space = len("%100.0")
+    percent = 100.0 * thus_far / eventual_total
+    percent_str = ("%%%.1f" % percent).rjust(percent_space)
+    line = " " + percent_str + line
+
+    # bar
+    console_width = get_terminal_size()[1] - 1
+    bar_space = console_width - len(line)
+    tick_count = bar_space - len("[>]")
+    done_count = int(tick_count * thus_far / eventual_total)
+    todo_count = tick_count - done_count
+    if done_count == 0:
+        arrow = ""
+    else:
+        arrow_head = " " + banner_text + " =="
+        arrow = "=" * (done_count - len(arrow_head)) + arrow_head
+        arrow = arrow[-done_count:]
+    bar_str = "[%s>%s]" % (arrow, " " * todo_count)
+    line = bar_str + line
+
+    write_to_stdout_maybe(line)
+    write_to_stdout_maybe("\r")
+def progress_done():
+    write_to_stdout_maybe("\n")
+def progress_clear():
+    write_to_stdout_maybe(" " * (get_terminal_size()[1] - 1))
+    write_to_stdout_maybe("\r")
+def get_terminal_size():
+    """ returns (lines:int, cols:int) """
+    try:
+        # this should work for all linux
+        import fcntl, termios
+        fd = 1 # stdout
+        return struct.unpack("hh", fcntl.ioctl(fd, termios.TIOCGWINSZ, "1234"))
+    except:
+        pass
+    try:
+        # try windows
+        import ctypes, struct
+        string_buffer = ctypes.create_string_buffer(22)
+        ctypes.windll.kernel32.GetConsoleScreenBufferInfo(ctypes.windll.kernel32.GetStdHandle(-12), string_buffer)
+        (left, top, right, bottom) = struct.unpack("hhhhHhhhhhh", string_buffer.raw)[5:9]
+        return (bottom - top + 1, right - left + 1)
+    except:
+        pass
+    # give up
+    return (25, 80)
+
+def progress_loop(read_function, write_function, thus_far, total, time_tracker, banner_text):
+    while True:
+        progress(thus_far, total, time_tracker, banner_text)
+        chunk = read_function()
+        if len(chunk) == 0:
+            break
+        write_function(chunk)
+        thus_far += len(chunk)
+    return thus_far
+
+def make_parent(path):
+    parent = os.path.split(path)[0]
+    if parent == "":
+        return # assume "." always exists
+    if not os.path.isdir(parent):
+        os.makedirs(parent)
+def full_split(path):
+    parent, name = os.path.split(path)
+    if parent == "":
+        # will only happen for relative paths
+        return [name]
+    if name == "":
+        # will happen for "/" or for paths ending with trailing slashes
+        return [parent]
+    result = full_split(parent)
+    result.append(name)
+    return result
+
+# the put command
+def put(paths, key, name_override):
+    # validate name_override
+    if name_override != "":
+        # not totally thorough
+        illegal_chars = set(r'<>:"/\|?*' + "".join(chr(x) for x in range(0x20)))
+        illegal_names = [".", ".."]
+        if any(c in illegal_chars for c in name_override) or name_override in illegal_names:
+            sys.exit("ERROR: illegal name: " + repr(name_override))
+
+    input_is_stdin = False
+    if paths == ["-"]:
+        # gotta read entire contents to get the size
+        file_contents = str_to_bytes(sys.stdin.read())
+        file_name = name_override
+        if file_name == "":
+            # make up some name
+            file_name = "wolfebin-stdin.tmp"
+        size = len(file_contents)
+        file_infos = [(file_name, size, file_contents)]
+        input_is_stdin = True
+    else:
+        # separate paths into files and directories
+        specific_files = []
+        specific_files_set = set()
+        specific_dirs = []
+        specific_dirs_set = set()
+        for path in paths:
+            abs_path = os.path.abspath(path)
+            if os.path.isfile(path):
+                if abs_path not in specific_files_set:
+                    specific_files_set.add(abs_path)
+                    specific_files.append(abs_path)
+            elif os.path.isdir(path):
+                if abs_path not in specific_dirs_set:
+                    specific_dirs.append(abs_path)
+                    specific_dirs_set.add(abs_path)
+            else:
+                sys.exit("ERROR: not a file or directory: " + repr(path))
+
+        # remove paths already included by a parent directory
+        for items_list, items_set in ((specific_dirs, specific_dirs_set), (specific_files, specific_files_set)):
+            for specific_item in items_list[:]:
+                item_parts = full_split(specific_item)
+                for i in reversed(range(1, len(item_parts))):
+                    ancestor = os.path.join(*item_parts[:i])
+                    if ancestor in specific_dirs_set:
+                        items_set.remove(specific_item)
+                        items_list.remove(specific_item)
+
+        # find every individual file to upload
+        is_single_specific_item = len(specific_files) + len(specific_dirs) == 1
+        file_infos = []
+        for specific_file in specific_files:
+            reported_name = os.path.split(specific_file)[1]
+            if name_override != "":
+                if is_single_specific_item:
+                    reported_name = name_override
+                else:
+                    reported_name = name_override + "/" + reported_name
+            size = os.path.getsize(specific_file)
+            file_infos.append((reported_name, size, specific_file))
+        for specific_dir in specific_dirs:
+            # keep paths starting with the specific directory's name
+            chop_off_this_many_parts_from_paths = len(full_split(specific_dir)) - 1
+            if name_override != "" and is_single_specific_item:
+                # actually, don't use the specific directory's name. override it.
+                chop_off_this_many_parts_from_paths += 1
+            for dirpath, dirnames, filenames in os.walk(specific_dir):
+                for filename in filenames:
+                    actual_path = os.path.join(dirpath, filename)
+                    reported_name = "/".join(full_split(actual_path)[chop_off_this_many_parts_from_paths:])
+                    if name_override != "":
+                        reported_name = name_override + "/" + reported_name
+                    size = os.path.getsize(actual_path)
+                    file_infos.append((reported_name, size, actual_path))
+    file_infos.sort()
+
+    # now we're ready to talk to the server
+    connection = open_connection()
+    connection.write(str_to_bytes(put_command))
+    connection.write_string(key)
+    connection.check()
+
+    connection.write_int(len(file_infos))
+    for file_name, file_size, actual_path in file_infos:
+        connection.write_string(file_name)
+        connection.write_long(file_size)
+
+    total_size = sum(size + md5sum_len for (_, size, _) in file_infos)
+    thus_far = 0
+    time_tracker = {}
+    for file_name, file_size, actual_path in file_infos:
+        digester = hashlib.md5()
+        if input_is_stdin:
+            # reinterpret the tuple a little
+            file_contents = actual_path
+            file_handle = StringIO(file_contents)
+        else:
+            file_handle = open(actual_path, "rb")
+        try:
+            def read_function():
+                chunk = file_handle.read(chunk_size)
+                digester.update(chunk)
+                return chunk
+            write_function = lambda chunk: connection.write(chunk)
+            thus_far = progress_loop(read_function, write_function, thus_far, total_size, time_tracker, file_name)
+        finally:
+            file_handle.close()
+        connection.write(str_to_bytes(digester.hexdigest()))
+        thus_far += md5sum_len
+        progress(thus_far, total_size, time_tracker, file_name)
+        if connection.check(crash_on_error=False) != None:
+            progress_clear()
+            if len(file_infos) == 1:
+                sys.stderr.write("WARNING: checksum failed\n")
+            else:
+                sys.stderr.write("WARNING: checksum failed for %s\n" % repr(file_name))
+    progress_done()
+
+# the get command
+def get(key, output_path):
+    connection = open_connection()
+    connection.write(str_to_bytes(get_command))
+    connection.write_string(key)
+    connection.check()
+    file_count = connection.read_int()
+    if output_path == "-":
+        global should_print_to_stdout
+        should_print_to_stdout = False
+        if file_count != 1:
+            sys.exit("ERROR: can only write 1 file to stdout. download includes %i files." % file_count)
+    file_infos = []
+    for _ in range(file_count):
+        file_infos.append((connection.read_string(), connection.read_long()))
+    total_size = sum(size + md5sum_len for (_, size) in file_infos)
+    root_set = set(full_split(file_name)[0] for (file_name, _) in file_infos)
+    output_is_stdout = False
+    output_prefix = None
+    output_override = None
+    if output_path == "-":
+        output_is_stdout = True
+    elif len(root_set) > 1 or os.path.isdir(output_path):
+        output_prefix = output_path + "/"
+    else:
+        output_override = output_path
+    if output_prefix == "./":
+        # "./" looks ugly
+        output_prefix = None
+
+    started = []
+    completed_count = 0
+    thus_far = 0
+    time_tracker = {}
+    for (file_name, file_size) in file_infos:
+        if output_is_stdout:
+            output_handle = sys.stdout
+        else:
+            if output_override != None:
+                # replace the first (possibly only) part with the override
+                file_name = "/".join([output_override] + full_split(file_name)[1:])
+            if output_prefix != None:
+                file_name = output_prefix + file_name
+            started.append(file_name)
+            make_parent(file_name)
+            output_handle = open(file_name, "wb")
+        try:
+            local_size = [0]
+            digester = hashlib.md5()
+            def read_function():
+                # be sure to stop reading at the end of the file size
+                chunk = connection.read(min(chunk_size, file_size - local_size[0]))
+                local_size[0] += len(chunk)
+                digester.update(chunk)
+                return chunk
+            write_function = lambda chunk: output_handle.write(chunk)
+            thus_far = progress_loop(read_function, write_function, thus_far, total_size, time_tracker, file_name)
+        finally:
+            if output_handle != sys.stdout:
+                output_handle.close()
+        if local_size[0] != file_size:
+            # incomplete
+            break
+        # check the md5
+        md5sum = bytes_to_str(connection.read(md5sum_len))
+        if md5sum != digester.hexdigest():
+            progress_clear()
+            if len(file_infos) == 1:
+                sys.stderr.write("WARNING: checksum failed\n")
+            else:
+                sys.stderr.write("WARNING: checksum failed for %s\n" % repr(file_name))
+        thus_far += len(md5sum)
+        progress(thus_far, total_size, time_tracker, file_name)
+        completed_count += 1
+    progress_done()
+    if len(started) == 1:
+        write_to_stdout_maybe("downloaded %s\n" % repr(started[0]))
+    else:
+        write_to_stdout_maybe("downloaded %i files:\n" % len(started))
+        started_roots_set = set(full_split(name)[0] for name in started)
+        names = []
+        for name in started_roots_set:
+            if os.path.isdir(name):
+                name += "/"
+            names.append(name)
+        write_to_stdout_maybe("".join(name + "\n" for name in names))
+    if completed_count < len(file_infos):
+        sys.stderr.write("WARNING: download incomplete. the upload must have been interrupted.\n")
+
+should_print_to_stdout = True
+def write_to_stdout_maybe(msg):
+    if should_print_to_stdout:
+        sys.stdout.write(msg)
+        sys.stdout.flush()
+
+# the delete command
+def delete(key):
+    connection = open_connection()
+    connection.write(str_to_bytes(delete_command))
+    connection.write_string(key)
+    connection.check()
+
+def get_key_list():
+    connection = open_connection()
+    connection.write(str_to_bytes(list_command))
+    connection.check()
+
+    server_version = connection.read_string()
+    list_length = connection.read_int()
+    items = []
+    for _ in range(list_length):
+        key = connection.read_string()
+        file_count = connection.read_int()
+        file_infos = []
+        for _ in range(file_count):
+            file_infos.append((connection.read_string(), connection.read_long()))
+        items.append((key, file_infos))
+    items.sort()
+    return (items, server_version)
+
+# the list command
+def list_keys(specific_key, verbose):
+    if verbose == None:
+        if specific_key == None:
+            verbose = 0
+        else:
+            verbose = 2
+    (items, server_version) = get_key_list()
+    if specific_key != None:
+        items = [(key, file_infos) for (key, file_infos) in items if key == specific_key]
+        if items == []:
+            sys.exit("ERROR: key not found: " + repr(specific_key))
+    if verbose == 0:
+        # key names
+        print(" ".join(repr(item[0]) for item in items))
+        return
+    print("client version: " + __version__)
+    print("server version: " + server_version)
+    max_key_len = max(len(repr(item[0])) for item in items)
+    max_key_len = min(max_key_len, 32)
+    justifiy_size = lambda size: int_to_human_binary(size).rjust(len("1023k")) + "B"
+    for (key, file_infos) in sorted(items):
+        justified_key = repr(key).ljust(max_key_len)
+        total_size = sum(size for (_, size) in file_infos)
+        if verbose == 1 or len(file_infos) == 1:
+            name_part = file_infos[0][0]
+            if len(file_infos) != 1:
+                name_part += ", ..."
+            print("%s %s %s" % (
+                justified_key,
+                justifiy_size(total_size),
+                name_part,
+            ))
+        elif verbose == 2:
+            print("%s %s %i files:" % (
+                justified_key,
+                justifiy_size(total_size),
+                len(file_infos),
+            ))
+            indentation = " " * (max_key_len + len(justifiy_size(0)))
+            for (file_name, file_size) in file_infos:
+                print("%s %s %s" % (
+                    indentation,
+                    justifiy_size(file_size),
+                    file_name,
+                ))
+
+bash_completion_source = """\
+# bash completion for wolfebin
+
+_wolfebin()
+{
+    # Simply doing `COMPREPLY=($(wolfebin ...))` splits on space regardless of
+    # backslash escapes, so it won't work for completion including spaces.
+    # Doing `wolfebin ... | readarray -t COMPREPLY` doesn't modify the
+    # COMPREPLY variable at all, probably because of scoping issues.
+    # Looks like we HAVE to use a temp file. Darn.
+    # We have to check if the file is empty, or else we say there's a single
+    # suggestion which is the empty string.
+    tmp=$(tempfile)
+    wolfebin bash-completion "${COMP_POINT}" "${COMP_LINE}" "${COMP_KEY}" "${COMP_TYPE}" "${COMP_CWORD}" "${COMP_WORDS[@]}" > $tmp
+    if [[ -s $tmp ]]; then
+        readarray -t COMPREPLY < $tmp
+    fi
+    rm -f $tmp
+} &&
+complete -F _wolfebin -o default wolfebin
+"""
+def install_bash_completion():
+    with open("/etc/bash_completion.d/wolfebin", "w") as f:
+        f.write(bash_completion_source)
+
+def get_bash_completion_options(parser, word, words_index, words):
+    previous_word = words[words_index - 1]
+    if previous_word in ("-k", "--key"):
+        # do a list to find out how to complete this
+        return (item[0] for item in get_key_list()[0])
+    if word.startswith("-"):
+        # it's a switch
+        short_opts = itertools.chain(*(
+            option._short_opts for option in parser.option_list
+        ))
+        long_opts = (option.get_opt_string() for option in parser.option_list)
+        options = itertools.chain(short_opts, long_opts)
+        return options
+    if words_index == 1:
+        # command
+        return all_command_names
+    return ()
+
+def perform_bash_completion(parser, args):
+    line_index = int(args[0])
+    line = args[1]
+    pressed_key = chr(int(args[2]))
+    completion_type = chr(int(args[3]))
+    words_index = int(args[4])
+    words = args[5:]
+    word = words[words_index]
+    def bash_escape(s):
+        """escape special chars with backslashes"""
+        special_characters = "\\ #;&\"\',`:!*?${}()[]><|"
+        for c in special_characters:
+            s = s.replace(c, "\\" + c)
+        return s
+    def bash_resolve(s):
+        """resolve backslash escapes and nested quotes"""
+        # it's too bad shlex doesn't work with backslashes
+        chars = []
+        inside_single_quotes = False
+        inside_double_quotes = False
+        index = 0
+        while index < len(s):
+            c = s[index]
+            index += 1
+            if inside_single_quotes:
+                if c == "'":
+                    inside_single_quotes = False
+                else:
+                    chars.append(c)
+            else:
+                if c == "'":
+                    if inside_double_quotes:
+                        chars.append(c)
+                    else:
+                        inside_single_quotes = True
+                elif c == "\\":
+                    if index < len(s):
+                        chars.append(s[index])
+                    index += 1
+                elif c == '"':
+                    inside_double_quotes = not inside_double_quotes
+                else:
+                    chars.append(c)
+        return "".join(chars)
+    # normalize the word
+    word = bash_escape(bash_resolve(word))
+    options = get_bash_completion_options(parser, word, words_index, words)
+    options = set(bash_escape(option) for option in options)
+    results = [option for option in options if option.startswith(word)]
+    return "\n".join(results)
+
+# command line interface
+if __name__ == "__main__":
+    parser = optparse.OptionParser(usage=usage_content, version=__version__)
+    parser.add_option("-k", "--key", metavar="KEY", help=\
+        "specifies an identifier to use for putting and getting. " + \
+        "the same identifier must be used for putting and getting a file. " + \
+        "default is usually \"\"."
+    )
+    parser.add_option("-o", "--output", metavar="PATH", help=\
+        "write file into PATH. if PATH is a directory, uses the file's " + \
+        "original name in the directory. otherwise, uses PATH as the file " + \
+        "to save to. default is \".\"."
+    )
+    parser.add_option("-n", "--name", metavar="NAME", help=\
+        "name the file NAME for downloads. default is the file's real name."
+    )
+    parser.add_option("--verbose", type="int", metavar="LEVEL", help=\
+        "0: (default without -k) print only keys. \n" +
+        "1: print client and server versions. for each key, print total download size and 1 file name. \n" +
+        "2: (default with -k) same as 1 but prints each file and size for each key.",
+    )
+    parser.add_option("-v", action="count", dest="verbose_counter", default=0, help=\
+        "increments --verbose. -v is equivalent to --verbose=1. -vv is equivalent to --verbose=2."
+    )
+    if len(sys.argv) >= 2 and sys.argv[1] == "bash-completion":
+        sys.stdout.write(perform_bash_completion(parser, sys.argv[2:]))
+        sys.exit()
+    (options, args) = parser.parse_args()
+    if args == []:
+        sys.exit(usage_message)
+    command = args[0]
+    args = args[1:]
+    key = options.key
+    output_path = options.output
+    name_override = options.name
+    verbose = None
+    if options.verbose != None:
+        verbose = options.verbose
+    if options.verbose_counter != 0:
+        if options.verbose != None:
+            parser.error("use either -v or --verbose, not both")
+        verbose = options.verbose_counter
+    if command in get_names:
+        if len(args) != 0:
+            sys.exit(usage_message)
+        if name_override != None:
+            sys.exit(usage_message)
+        if output_path == None:
+            output_path = "."
+        if key == None:
+            key = ""
+        get(key, output_path)
+    elif command in put_names:
+        if len(args) == 0:
+            sys.exit(usage_message)
+        paths = args
+        if output_path != None:
+            sys.exit(usage_message)
+        if key == None:
+            key = ""
+        if name_override == None:
+            name_override = ""
+        put(paths, key, name_override)
+    elif command in delete_names:
+        if len(args) != 0:
+            sys.exit(usage_message)
+        if name_override != None or output_path != None:
+            sys.exit(usage_message)
+        if key == None:
+            sys.exit(usage_message)
+        delete(key)
+    elif command in list_names:
+        if len(args) != 0:
+            sys.exit(usage_message)
+        if name_override != None or output_path != None:
+            sys.exit(usage_message)
+        list_keys(key, verbose)
+    elif command in install_bash_completion_names:
+        if len(args) != 0 or name_override != None or output_path != None or key != None:
+            sys.exit(usage_message)
+        install_bash_completion()
+    else:
+        sys.exit(usage_message)
+
+
