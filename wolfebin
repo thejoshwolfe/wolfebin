@@ -6,6 +6,7 @@ import optparse
 import socket
 import hashlib
 import itertools
+import json
 python_version = sys.version_info[0]
 if python_version == 2:
     from StringIO import StringIO
@@ -45,9 +46,32 @@ usage_message = "Usage:" + usage_content
 __version__ = "4.10"
 
 # config
-server_name = "[this used to be a hard-coded server url. TODO: configurable.]"
+config_path = os.path.expanduser("~/.wolfebin/config.json")
+current_config_version = 0
+server_name = ""
 server_port = 55247
 chunk_size = 0x10000
+
+def read_config():
+    global server_name, server_port
+    try:
+        with open(config_path) as f:
+            config = json.loads(f.read())
+    except IOError:
+        sys.exit(("ERROR: wolfebin is not configured. Try one of these:\n" +
+                  "    %(prog)s config -i\n" +
+                  "    %(prog)s config -e\n" +
+                  "    %(prog)s help config") % {"prog": prog})
+    except ValueError:
+        sys.exit(("ERROR: the wolfebin config is corrupted. Try:\n" +
+                  "    %(prog)s config -e") % {"prog": prog})
+    # let key errors happen
+    version = config["version"]
+    if version > current_config_version:
+        sys.exit("ERROR: wolfebin config is newer than this version of wolfebin.")
+    server_name = config["hostname"]
+    server_port = config["port"]
+
 
 def open_connection():
     actual_connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
