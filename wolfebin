@@ -2,7 +2,6 @@
 
 import sys, os
 import time, struct
-import optparse
 import socket
 import hashlib
 import itertools
@@ -18,31 +17,6 @@ elif python_version == 3:
     str_to_bytes = lambda s: bytes(s, "utf8")
 md5sum_len = len(str_to_bytes(hashlib.md5().hexdigest()))
 
-put_names = ("put", "send", "push", "p")
-put_command = "p"
-
-get_names = ("get", "receive", "pull", "g")
-get_command = "g"
-
-delete_names = ("delete", )
-delete_command = "d"
-
-list_names = ("list", "ls", "l")
-list_command = "l"
-
-install_bash_completion_names = ("install", "install-bash-completion")
-
-all_command_names = itertools.chain(put_names, get_names, list_names, install_bash_completion_names)
-
-prog = os.path.split(sys.argv[0])[1]
-usage_content = """
-%(prog)s put [-k KEY] [-n NAME] file...
-%(prog)s get [-k KEY] [-o PATH]
-%(prog)s list [-k KEY] [-v|-vv]
-sudo %(prog)s install[-bash-completion]
-%(prog)s --help\
-""" % {"prog": prog}
-usage_message = "Usage:" + usage_content
 __version__ = "4.10"
 
 # config
@@ -277,7 +251,7 @@ def full_split(path):
     return result
 
 # the put command
-def put(paths, key, name_override):
+def put_func(paths, key, name_override):
     # validate name_override
     if name_override != "":
         # not totally thorough
@@ -397,7 +371,7 @@ def put(paths, key, name_override):
     progress_done()
 
 # the get command
-def get(key, output_path):
+def get_func(key, output_path):
     connection = open_connection()
     connection.write(str_to_bytes(get_command))
     connection.write_string(key)
@@ -517,7 +491,9 @@ def get_key_list():
     return (items, server_version)
 
 # the list command
-def list_keys(specific_key, verbose):
+def list_func():
+    specific_key = None
+    verbose = None
     if verbose == None:
         if specific_key == None:
             verbose = 0
@@ -563,7 +539,10 @@ def list_keys(specific_key, verbose):
                     file_name,
                 ))
 
-bash_completion_source = """\
+bash_completion_path = "/etc/bash_completion.d/wolfebin"
+def install_func():
+    with open(bash_completion_path, "w") as f:
+        f.write("""\
 # bash completion for wolfebin
 
 _wolfebin()
@@ -583,162 +562,175 @@ _wolfebin()
     rm -f $tmp
 } &&
 complete -F _wolfebin -o default wolfebin
-"""
-def install_bash_completion():
-    with open("/etc/bash_completion.d/wolfebin", "w") as f:
-        f.write(bash_completion_source)
+""")
 
-def get_bash_completion_options(parser, word, words_index, words):
-    previous_word = words[words_index - 1]
-    if previous_word in ("-k", "--key"):
-        # do a list to find out how to complete this
-        return (item[0] for item in get_key_list()[0])
-    if word.startswith("-"):
-        # it's a switch
-        short_opts = itertools.chain(*(
-            option._short_opts for option in parser.option_list
-        ))
-        long_opts = (option.get_opt_string() for option in parser.option_list)
-        options = itertools.chain(short_opts, long_opts)
-        return options
-    if words_index == 1:
-        # command
-        return all_command_names
-    return ()
+def command_line_main():
+    import optparse
+    prog = os.path.split(sys.argv[0])[1]
+    usage_variables = {"prog": prog}
+    class Command:
+        def __init__(self, parser, names, args_range, func):
+            self.parser = parser
+            self.names = names
+            self.args_range = args_range
+            self.func = func
+    commands = []
 
-def perform_bash_completion(parser, args):
-    line_index = int(args[0])
-    line = args[1]
-    pressed_key = chr(int(args[2]))
-    completion_type = chr(int(args[3]))
-    words_index = int(args[4])
-    words = args[5:]
-    word = words[words_index]
-    def bash_escape(s):
-        """escape special chars with backslashes"""
-        special_characters = "\\ #;&\"\',`:!*?${}()[]><|"
-        for c in special_characters:
-            s = s.replace(c, "\\" + c)
-        return s
-    def bash_resolve(s):
-        """resolve backslash escapes and nested quotes"""
-        # it's too bad shlex doesn't work with backslashes
-        chars = []
-        inside_single_quotes = False
-        inside_double_quotes = False
-        index = 0
-        while index < len(s):
-            c = s[index]
-            index += 1
-            if inside_single_quotes:
-                if c == "'":
-                    inside_single_quotes = False
-                else:
-                    chars.append(c)
-            else:
-                if c == "'":
-                    if inside_double_quotes:
-                        chars.append(c)
-                    else:
-                        inside_single_quotes = True
-                elif c == "\\":
-                    if index < len(s):
-                        chars.append(s[index])
-                    index += 1
-                elif c == '"':
-                    inside_double_quotes = not inside_double_quotes
-                else:
-                    chars.append(c)
-        return "".join(chars)
-    # normalize the word
-    word = bash_escape(bash_resolve(word))
-    options = get_bash_completion_options(parser, word, words_index, words)
-    options = set(bash_escape(option) for option in options)
-    results = [option for option in options if option.startswith(word)]
-    return "\n".join(results)
-
-# command line interface
-if __name__ == "__main__":
-    parser = optparse.OptionParser(usage=usage_content, version=__version__)
-    parser.add_option("-k", "--key", metavar="KEY", help=\
+    key_args = ["-k", "--key"]
+    key_kwargs = {"metavar": "KEY", "dest": "key", "help": \
         "specifies an identifier to use for putting and getting. " + \
-        "the same identifier must be used for putting and getting a file. " + \
-        "default is usually \"\"."
+        "getting with a specific key will get what was put with that key. " + \
+        "the default is \"\"."
+    }
+
+    get_parser = optparse.OptionParser(usage="%(prog)s get [-k KEY] [-o PATH]" % usage_variables, description=\
+        "Download something."
     )
-    parser.add_option("-o", "--output", metavar="PATH", help=\
+    get_parser.add_option(*key_args, **key_kwargs)
+    get_parser.add_option("-o", "--output", metavar="PATH", dest="output_path", help=\
         "write file into PATH. if PATH is a directory, uses the file's " + \
         "original name in the directory. otherwise, uses PATH as the file " + \
         "to save to. default is \".\"."
     )
-    parser.add_option("-n", "--name", metavar="NAME", help=\
-        "name the file NAME for downloads. default is the file's real name."
-    )
-    parser.add_option("--verbose", type="int", metavar="LEVEL", help=\
-        "0: (default without -k) print only keys. \n" +
-        "1: print client and server versions. for each key, print total download size and 1 file name. \n" +
-        "2: (default with -k) same as 1 but prints each file and size for each key.",
-    )
-    parser.add_option("-v", action="count", dest="verbose_counter", default=0, help=\
-        "increments --verbose. -v is equivalent to --verbose=1. -vv is equivalent to --verbose=2."
-    )
-    if len(sys.argv) >= 2 and sys.argv[1] == "bash-completion":
-        sys.stdout.write(perform_bash_completion(parser, sys.argv[2:]))
-        sys.exit()
-    (options, args) = parser.parse_args()
-    if args == []:
-        sys.exit(usage_message)
-    command = args[0]
-    args = args[1:]
-    key = options.key
-    output_path = options.output
-    name_override = options.name
-    verbose = None
-    if options.verbose != None:
-        verbose = options.verbose
-    if options.verbose_counter != 0:
-        if options.verbose != None:
-            parser.error("use either -v or --verbose, not both")
-        verbose = options.verbose_counter
-    if command in get_names:
-        if len(args) != 0:
-            sys.exit(usage_message)
-        if name_override != None:
-            sys.exit(usage_message)
-        if output_path == None:
-            output_path = "."
-        if key == None:
-            key = ""
-        get(key, output_path)
-    elif command in put_names:
-        if len(args) == 0:
-            sys.exit(usage_message)
-        paths = args
-        if output_path != None:
-            sys.exit(usage_message)
-        if key == None:
-            key = ""
-        if name_override == None:
-            name_override = ""
-        put(paths, key, name_override)
-    elif command in delete_names:
-        if len(args) != 0:
-            sys.exit(usage_message)
-        if name_override != None or output_path != None:
-            sys.exit(usage_message)
-        if key == None:
-            sys.exit(usage_message)
-        delete(key)
-    elif command in list_names:
-        if len(args) != 0:
-            sys.exit(usage_message)
-        if name_override != None or output_path != None:
-            sys.exit(usage_message)
-        list_keys(key, verbose)
-    elif command in install_bash_completion_names:
-        if len(args) != 0 or name_override != None or output_path != None or key != None:
-            sys.exit(usage_message)
-        install_bash_completion()
-    else:
-        sys.exit(usage_message)
+    commands.append(Command(get_parser, ["get"], (0, 0), get_func))
 
+    put_parser = optparse.OptionParser(usage="%(prog)s put [-k KEY] [-n NAME] file..." % usage_variables, description=\
+        "Upload something."
+    )
+    put_parser.add_option(*key_args, **key_kwargs)
+    put_parser.add_option("-n", "--name", metavar="NAME", dest="name_override", help=\
+        "name the file NAME when it is downloaded. " + \
+        "the default uses the real name of the file. " + \
+        "if a single directory is given, this option is the new name of the directory. " + \
+        "if multiple files/directories are given, this option encloses them in a directory."
+    )
+    commands.append(Command(put_parser, ["put"], (0, float("inf")), lambda *args, **kwargs: put_func(args, **kwargs)))
+
+    list_parser = optparse.OptionParser(usage="%(prog)s list" % usage_variables, description=\
+        "List exisitng keys."
+    )
+    commands.append(Command(list_parser, ["list", "ls"], (0, 0), list_func))
+
+    install_parser = optparse.OptionParser(usage="sudo %(prog)s install[-bash-completion]" % usage_variables, description=\
+        "Install bash completion to " + bash_completion_path + ".",
+    )
+    commands.append(Command(install_parser, ["install", "install-bash-completion"], (0, 0), install_func))
+
+    usage_variables["main_names"] = "|".join(command.names[0] for command in commands)
+    help_parser = optparse.OptionParser(usage="%(prog)s help [%(main_names)s]" % usage_variables, description=\
+        "TODO: implement this",
+    )
+    def help_func(command=""):
+        print("asdf: " + command)
+        sys.exit(1)
+    commands.append(Command(help_parser, ["install", "install-bash-completion"], (0, 1), help_func))
+
+    name_to_command = {name: command for command in commands for name in command.names}
+    main_usage = "Usage:\n" + "\n".join(command.parser.get_usage()[len("Usage: "):-len("\n")] for command in commands)
+
+    def perform_bash_completion(args):
+        def get_bash_completion_options(word, words_index, words):
+            if words_index == 1:
+                # assist with command name
+                return name_to_command.keys()
+            # there is a named command
+            try:
+                command = name_to_command[words[1]]
+            except KeyError:
+                # bad command. can't help you.
+                return ()
+            name_to_option = {name: option for option in command.parser.option_list for name in itertools.chain(option._short_opts, option._long_opts)}
+            if word.startswith("-"):
+                # it's a switch
+                return name_to_option.keys()
+            # it's not a switch
+            previous_word = words[words_index - 1]
+            if previous_word.startswith("-"):
+                # previous word was a switch
+                try:
+                    option = name_to_option[previous_word]
+                except KeyError:
+                    # can't help you
+                    return ()
+                if option.metavar == "KEY":
+                    # do a list to find out how to complete this
+                    return (item[0] for item in get_key_list()[0])
+            return ()
+
+        line_index = int(args[0])
+        line = args[1]
+        pressed_key = chr(int(args[2]))
+        completion_type = chr(int(args[3]))
+        words_index = int(args[4])
+        words = args[5:]
+        word = words[words_index]
+        def bash_escape(s):
+            """escape special chars with backslashes"""
+            special_characters = "\\ #;&\"\',`:!*?${}()[]><|"
+            for c in special_characters:
+                s = s.replace(c, "\\" + c)
+            return s
+        def bash_resolve(s):
+            """resolve backslash escapes and nested quotes"""
+            # it's too bad shlex doesn't work with backslashes
+            chars = []
+            inside_single_quotes = False
+            inside_double_quotes = False
+            index = 0
+            while index < len(s):
+                c = s[index]
+                index += 1
+                if inside_single_quotes:
+                    if c == "'":
+                        inside_single_quotes = False
+                    else:
+                        chars.append(c)
+                else:
+                    if c == "'":
+                        if inside_double_quotes:
+                            chars.append(c)
+                        else:
+                            inside_single_quotes = True
+                    elif c == "\\":
+                        if index < len(s):
+                            chars.append(s[index])
+                        index += 1
+                    elif c == '"':
+                        inside_double_quotes = not inside_double_quotes
+                    else:
+                        chars.append(c)
+            return "".join(chars)
+        # normalize the word
+        word = bash_escape(bash_resolve(word))
+        options = get_bash_completion_options(word, words_index, words)
+        options = set(bash_escape(option) for option in options)
+        results = [option for option in options if option.startswith(word)]
+        return "\n".join(results)
+
+    args = sys.argv[1:]
+    # handle some cases specifically
+    if len(args) == 0 or args[0] in ("-h", "--help"):
+        sys.exit(main_usage)
+    if args[0] in ("--version",):
+        sys.exit(__version__)
+    if args[0] == "bash-completion":
+        try:
+            sys.stdout.write(perform_bash_completion(args[1:]))
+        except: # even catch sys.exit.
+            pass
+        return
+
+    command_name = args[0]
+    args = args[1:]
+    try:
+        command = name_to_command[command_name]
+    except KeyError:
+        sys.exit("Unkown command: " + command_name + "\n\n" + main_usage)
+    (options, args) = command.parser.parse_args(args)
+    if len(args) < options.args_range[0] or lan(args) > options.args_range[1]:
+        sys.exit("Wrong number of arguments for command '" + command_name + "'.")
+    command.func(*args, **options.__dict__)
+
+if __name__ == "__main__":
+    command_line_main()
 
