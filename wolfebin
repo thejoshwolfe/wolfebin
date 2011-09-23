@@ -26,7 +26,7 @@ server_name = ""
 server_port = 55247
 chunk_size = 0x10000
 
-def read_config():
+def init_config():
     global server_name, server_port
     try:
         with open(config_path) as f:
@@ -41,18 +41,20 @@ def read_config():
                   "    %(prog)s config -e") % {"prog": prog})
     # let key errors happen
     version = config["version"]
-    if version > current_config_version:
+    # catch type mismatches with this check
+    if not (version <= current_config_version):
         sys.exit("ERROR: wolfebin config is newer than this version of wolfebin.")
     server_name = config["hostname"]
     server_port = config["port"]
 
 
 def open_connection():
+    init_config()
     actual_connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         actual_connection.connect((server_name, server_port))
     except socket.error:
-        sys.exit("ERROR: Can't connect to the wolfebin server.")
+        sys.exit("ERROR: Can't connect to the wolfebin server (" + server_name + ":" + str(server_port) + ").")
     return Connection(actual_connection)
 class Connection:
     def __init__(self, actual_connection):
@@ -564,8 +566,10 @@ _wolfebin()
 complete -F _wolfebin -o default wolfebin
 """)
 
+prog = "wolfebin"
 def command_line_main():
     import optparse
+    global prog
     prog = os.path.split(sys.argv[0])[1]
     usage_variables = {"prog": prog}
     class Command:
@@ -623,7 +627,7 @@ def command_line_main():
     def help_func(command=""):
         print("asdf: " + command)
         sys.exit(1)
-    commands.append(Command(help_parser, ["install", "install-bash-completion"], (0, 1), help_func))
+    commands.append(Command(help_parser, ["help"], (0, 1), help_func))
 
     name_to_command = {name: command for command in commands for name in command.names}
     main_usage = "Usage:\n" + "\n".join(command.parser.get_usage()[len("Usage: "):-len("\n")] for command in commands)
@@ -727,7 +731,7 @@ def command_line_main():
     except KeyError:
         sys.exit("Unkown command: " + command_name + "\n\n" + main_usage)
     (options, args) = command.parser.parse_args(args)
-    if len(args) < options.args_range[0] or lan(args) > options.args_range[1]:
+    if len(args) < command.args_range[0] or len(args) > command.args_range[1]:
         sys.exit("Wrong number of arguments for command '" + command_name + "'.")
     command.func(*args, **options.__dict__)
 
