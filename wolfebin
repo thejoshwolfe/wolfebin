@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 
+__version__ = "5.0"
+
 import sys, os
 import time, struct
 import socket
@@ -19,13 +21,11 @@ elif python_version == 3:
     coerce_unicode_to_str = lambda s: s
 md5sum_len = len(str_to_bytes(hashlib.md5().hexdigest()))
 
-__version__ = "5.0"
-
 # config
 config_path_before_user_expansion = "~/.wolfebin/config.json"
 config_path = os.path.expanduser(config_path_before_user_expansion)
 current_config_version = 0
-def init_config(response_to_bad_config="error"):
+def init_config():
     global config
     config = {
         "version": current_config_version,
@@ -41,8 +41,7 @@ def init_config(response_to_bad_config="error"):
             # write defaults so that the user can look at it
             save_config()
             raise IOError
-        version = config["version"]
-        if version > current_config_version:
+        if config["version"] > current_config_version:
             sys.exit("ERROR: wolfebin config is newer than this version of wolfebin.")
         # check values
         if config["server_name"] == "":

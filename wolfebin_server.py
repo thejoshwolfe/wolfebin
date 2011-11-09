@@ -1,25 +1,53 @@
 #!/usr/bin/env python
 
+__version__ = "5.0"
+
 import os, sys
 import struct, threading, time
 import hashlib
+import json
 import SocketServer
 
-host_name = "localhost"
-port_number = 55247
-chunk_size = 0x1000
-data_root = "wolfebin_data"
-__version__ = "4.1"
+config_path = "config.json"
+current_config_version = 0
+config = {
+    "version": current_config_version,
+    "host_name": "localhost",
+    "port_number": 55247,
+    "chunk_size": 0x1000,
+    "data_root": "wolfebin_data",
+}
+def read_json(path):
+    with open(path) as f:
+        return json.loads(f.read())
+def write_json(path, json_object):
+    with open(path, "w") as f:
+        f.write(json.dumps(json_object, sort_keys=True, indent=4))
+        f.write("\n")
+try:
+    config = read_json(config_path)
+    if config["version"] > current_config_version:
+        sys.exit("ERROR: config is too new.")
+except IOError:
+    sys.stderr.write("WARNING: initializing defaults in {}\n".format(config_path))
+    write_json(config_path, config)
 
 try:
     from wolfebin_config import *
 except ImportError:
     pass
 
-if not os.path.exists(data_root):
-    sys.exit("data_root not configured properly. %s does not exit." % repr(data_root))
+data_root = config["data_root"]
 database_path = os.path.join(data_root, "index")
 file_data_dir = os.path.join(data_root, "files")
+def check_database():
+    if os.path.exists(data_root):
+        return
+    sys.stderr.write("WARNING: creating new database in {}\n".format(data_root))
+    os.mkdir(data_root)
+    os.mkdir(file_data_dir)
+    database = {}
+    save_database(database)
 
 state_lock = threading.RLock()
 
@@ -92,13 +120,10 @@ def delete_file(key_hash):
 
 def get_database():
     # lock the database in case the caller didn't
-    with state_lock:
-        with open(database_path) as file_handle:
-            return eval(file_handle.read())
+    return read_json(database_path)
 def save_database(database):
     # caller should have a database lock
-    with open(database_path, "w") as file_handle:
-        file_handle.write(repr(database))
+    write_json(database_path, database)
 
 def get(connection, protocol):
     key = connection.read_string()
@@ -120,7 +145,7 @@ def get(connection, protocol):
             connection.write_long(size)
         while True:
             session_is_done = session == None or session.is_done
-            chunk = file_handle.read(chunk_size)
+            chunk = file_handle.read(config["chunk_size"])
             if len(chunk) != 0:
                 connection.write(chunk)
                 continue
@@ -155,7 +180,7 @@ def put(connection):
             thus_far = 0
             digester = hashlib.md5()
             while thus_far < file_size:
-                read_size = min(chunk_size, file_size - thus_far)
+                read_size = min(config["chunk_size"], file_size - thus_far)
                 chunk = connection.read(read_size)
                 if len(chunk) == 0:
                     return # incomplete upload
@@ -220,25 +245,9 @@ def server_forever():
                 connection.write("you suck")
     class ThreadedTCPServer(SocketServer.ThreadingMixIn, SocketServer.TCPServer):
         allow_reuse_address = True
-    server = ThreadedTCPServer((host_name, port_number), ConnectionHandler)
+    server = ThreadedTCPServer((config["host_name"], config["port_number"]), ConnectionHandler)
     server.serve_forever()
 
-def check_database():
-    database = get_database()
-    if database[("version",)] == 1:
-        sys.stdout.write("migrating database from 1 to 2...")
-        sys.stdout.flush()
-        new_database = {}
-        new_database[("version",)] = 2
-        del database[("version",)]
-        for (key, [(name, size, md5sum)]) in database.items():
-            real_file_name = hash_to_file_name(key_to_hash(key))
-            with open(real_file_name, "ab") as file_handle:
-                file_handle.write(md5sum)
-            new_database[key] = [(name, size)]
-        database = new_database
-        save_database(database)
-        print("done")
 if __name__ == "__main__":
     check_database()
     server_forever()
