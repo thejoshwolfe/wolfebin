@@ -130,7 +130,7 @@ def get(connection, protocol):
     key_hash = key_to_hash(key)
     try:
         with state_lock:
-            entries = get_database()[key]
+            entry = get_database()[key]
             session = find_session(key)
             file_handle = open_file(key_hash, "rb")
     except KeyError:
@@ -139,10 +139,10 @@ def get(connection, protocol):
     try:
         connection.ok()
         # header
-        connection.write_int(len(entries))
-        for (name, size) in entries:
-            connection.write_string(name)
-            connection.write_long(size)
+        connection.write_int(len(entry["files"]))
+        for file_entry in entry["files"]:
+            connection.write_string(file_entry["name"])
+            connection.write_long(file_entry["size"])
         while True:
             session_is_done = session == None or session.is_done
             chunk = file_handle.read(config["chunk_size"])
@@ -163,10 +163,17 @@ def put(connection):
     connection.ok()
     key_hash = key_to_hash(key)
     file_count = connection.read_int()
-    file_infos = [(connection.read_string(), connection.read_long()) for _ in range(file_count)]
+    entry = {
+        "files": [
+            {
+                "name": connection.read_string(),
+                "size": connection.read_long()
+            }
+        for _ in range(file_count)],
+    }
     with state_lock:
         database = get_database()
-        database[key] = file_infos
+        database[key] = entry
         save_database(database)
         # prevent two open write handles to the same file
         try:
@@ -176,7 +183,8 @@ def put(connection):
         file_handle = open_file(key_hash, "wb")
         session = Session(key)
     try:
-        for file_name, file_size in file_infos:
+        for file_entry in entry["files"]:
+            file_size = file_entry["size"]
             thus_far = 0
             digester = hashlib.md5()
             while thus_far < file_size:
@@ -217,15 +225,13 @@ def list_keys(connection):
     database_items = get_database().items()
     connection.ok()
     connection.write_string(__version__)
-    connection.write_int(len(database_items) - 1)
-    for (key, file_infos) in database_items:
-        if key == ("version",):
-            continue # we gotta fix this
+    connection.write_int(len(database_items))
+    for (key, entry) in database_items:
         connection.write_string(key)
-        connection.write_int(len(file_infos))
-        for (file_name, file_size) in file_infos:
-            connection.write_string(file_name)
-            connection.write_long(file_size)
+        connection.write_int(len(entry["files"]))
+        for file_entry in entry["files"]:
+            connection.write_string(file_entry["name"])
+            connection.write_long(file_entry["size"])
 
 def server_forever():
     class ConnectionHandler(SocketServer.BaseRequestHandler):

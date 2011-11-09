@@ -265,6 +265,8 @@ def full_split(path):
 
 # the put command
 def put_func(paths, key, name_override):
+    if key == None:
+        key = ""
     # validate name_override
     if name_override != "":
         # not totally thorough
@@ -343,7 +345,7 @@ def put_func(paths, key, name_override):
 
     # now we're ready to talk to the server
     connection = open_connection()
-    connection.write(str_to_bytes(put_command))
+    connection.write(str_to_bytes("p"))
     connection.write_string(key)
     connection.check()
 
@@ -385,8 +387,10 @@ def put_func(paths, key, name_override):
 
 # the get command
 def get_func(key, output_path):
+    if key == None:
+        key = ""
     connection = open_connection()
-    connection.write(str_to_bytes(get_command))
+    connection.write(str_to_bytes("g"))
     connection.write_string(key)
     connection.check()
     file_count = connection.read_int()
@@ -481,13 +485,13 @@ def write_to_stdout_maybe(msg):
 # the delete command
 def delete(key):
     connection = open_connection()
-    connection.write(str_to_bytes(delete_command))
+    connection.write(str_to_bytes("d"))
     connection.write_string(key)
     connection.check()
 
 def get_key_list():
     connection = open_connection()
-    connection.write(str_to_bytes(list_command))
+    connection.write(str_to_bytes("l"))
     connection.check()
 
     server_version = connection.read_string()
@@ -602,7 +606,7 @@ def command_line_main():
         "Download something."
     )
     get_parser.add_option(*key_args, **key_kwargs)
-    get_parser.add_option("-o", "--output", metavar="PATH", dest="output_path", help=\
+    get_parser.add_option("-o", "--output", metavar="PATH", dest="output_path", default=".", help=\
         "write file into PATH. if PATH is a directory, uses the file's " + \
         "original name in the directory. otherwise, uses PATH as the file " + \
         "to save to. default is \".\"."
@@ -613,7 +617,7 @@ def command_line_main():
         "Upload something."
     )
     put_parser.add_option(*key_args, **key_kwargs)
-    put_parser.add_option("-n", "--name", metavar="NAME", dest="name_override", help=\
+    put_parser.add_option("-n", "--name", metavar="NAME", dest="name_override", default="", help=\
         "name the file NAME when it is downloaded. " + \
         "the default uses the real name of the file. " + \
         "if a single directory is given, this option is the new name of the directory. " + \
