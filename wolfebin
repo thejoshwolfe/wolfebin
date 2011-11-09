@@ -25,154 +25,48 @@ __version__ = "5.0"
 config_path_before_user_expansion = "~/.wolfebin/config.json"
 config_path = os.path.expanduser(config_path_before_user_expansion)
 current_config_version = 0
-def repr_with_parameters(obj, *names, **kwargs):
-    return "{}({})".format(type(obj).__name__, ", ".join(itertools.chain(
-        (repr(getattr(obj, name)) for name in names),
-        ("{}={}".format(name, repr(value)) for name, value in kwargs.items()),
-    )))
-class ConfigOption:
-    def __init__(self, name, default, validator_func_src=None):
-        self.name = name
-        self.default = default
-        self.validator_func_src = validator_func_src
-        if validator_func_src == None:
-            self.validator_func = None
-        else:
-            self.validator_func = eval(validator_func_src)
-    def __repr__(self):
-        return repr_with_parameters(self, "name", "default", "validator_func_src")
-class ConfigValue:
-    def __init__(self, option, value):
-        self.option = option
-        self.value = value
-    def __repr__(self):
-        return repr_with_parameters(self, "option", "value")
-class Config:
-    options = [
-        ConfigOption("server_name", "", 'lambda s: s != ""'),
-        ConfigOption("server_port", 55247, 'lambda n: 0 <= n <= 0xffff'),
-        ConfigOption("chunk_size", 0x10000),
-    ]
-    options_by_name = {option.name: option for option in options}
-    def __init__(self):
-        self.__dict__["_values"] = {option.name: ConfigValue(option, option.default) for option in Config.options}
-    def __getattr__(self, name):
-        try:
-            return self._values[name].value
-        except KeyError:
-            raise AttributeError(name)
-    def __setattr__(self, name, value):
-        name = coerce_unicode_to_str(name)
-        value = coerce_unicode_to_str(value)
-        try:
-            option_value = self._values[name]
-        except KeyError:
-            raise AttributeError(name)
-        try:
-            if type(value) == str and type(option_value.option.default) == int:
-                # try to coerce strings to integers.
-                # this is to unify error reporting due to argv values.
-                if value.lower().startswith("0x"):
-                    value = int(value[2:], 16)
-                else:
-                    value = int(value)
-            if type(value) != type(option_value.option.default):
-                raise ValueError
-        except ValueError:
-            raise TypeError("wronge type for config option {}. {} shuold have type {}.".format(repr(name), repr(value), type(option_value.option.default).__name__))
-        if option_value.option.validator_func != None:
-            if not option_value.option.validator_func(value):
-                sys.exit("ERROR: invalid value for config option {}. {} does not satisfy {}".format(repr(name), repr(value), option_value.option.validator_func_src))
-        option_value.value = value
-        save_config(self._values.values())
-    def __repr__(self):
-        return repr_with_parameters(self, **self._values)
-
 def init_config(response_to_bad_config="error"):
     global config
-    config = Config()
+    config = {
+        "version": current_config_version,
+        "server_name": "",
+        "server_port": 55247,
+        "chunk_size": 0x10000,
+    }
     try:
         try:
             with open(config_path) as f:
-                config_json = json.loads(f.read())
+                config = json.loads(f.read())
         except IOError:
-            if response_to_bad_config == "error":
-                sys.exit(("ERROR: wolfebin is not configured. Try one of these:\n" +
-                          "    %(prog)s config -i\n" +
-                          "    %(prog)s config -e\n" +
-                          "    %(prog)s help config") % {"prog": prog})
-            elif response_to_bad_config == "warn":
-                sys.stderr.write("WARNING: wolfebin is not configured.\n")
-        except ValueError:
-            raise KeyError
-        else:
-            version = config_json["version"]
-            # catch type mismatches with this check
-            if not (version <= current_config_version):
-                sys.exit("ERROR: wolfebin config is newer than this version of wolfebin.")
-            del config_json["version"]
+            # write defaults so that the user can look at it
+            save_config()
+            raise IOError
+        version = config["version"]
+        if version > current_config_version:
+            sys.exit("ERROR: wolfebin config is newer than this version of wolfebin.")
+        # check values
+        if config["server_name"] == "":
+            raise IOError
+        config["server_port"]
+        config["chunk_size"]
+    except IOError:
+        sys.exit("ERROR: wolfebin is not configured. edit " + config_path_before_user_expansion)
+    except (ValueError, KeyError):
+        sys.exit("ERROR: wolfebin is corrupted. edit " + config_path_before_user_expansion)
 
-            for key, value in config_json.items():
-                config.__setattr__(key, value)
-    except KeyError:
-        sys.exit(("ERROR: the wolfebin config is corrupted. Try:\n" +
-                  "    %(prog)s config -e") % {"prog": prog})
-
-def save_config(config_values):
-    version_value = ConfigValue(ConfigOption("version", None), current_config_version)
-    config_values = itertools.chain(config_values, [version_value])
+def save_config():
     with open(config_path, "w") as f:
-        f.write(config_values_to_json(config_values))
+        f.write(json.dumps(config, sort_keys=True, indent=4))
         f.write("\n")
-def config_values_to_json(config_values):
-    json_object = {config_value.option.name: config_value.value for config_value in config_values}
-    return object_to_json(json_object)
-def object_to_json(json_object):
-    return json.dumps(json_object, sort_keys=True, indent=4)
-
-def config_func(*args, **kwargs):
-    if kwargs["edit"]:
-        editor_cmd = os.getenv("EDITOR")
-        if editor_cmd == None:
-            sys.exit("ERROR: $EDITOR environment variable not set")
-        try:
-            os.mkdir(os.path.dirname(config_path))
-        except OSError:
-            pass
-        import subprocess
-        sys.exit(subprocess.call([editor_cmd, config_path]))
-    options = Config.options
-    if len(args) != 0:
-        if args[0].find("=") != -1:
-            args = args[0].split("=", 1) + list(args[1:])
-        name = args[0]
-        try:
-            options = [Config.options_by_name[name]]
-        except KeyError:
-            sys.exit("ERROR: config option {} does not exist".format(repr(name)))
-        if len(args) != 1:
-            if kwargs["interactive"]:
-                sys.exit("ERROR: only one of VALUE or --interactive can be given")
-            value = args[1]
-            if len(args) != 2:
-                sys.exit("ERROR: too many arguments to config command")
-            init_config("ignore")
-            config.__setattr__(name, value)
-            return
-    if not kwargs["interactive"]:
-        init_config("warn")
-        config_values = (config._values[option.name] for option in options)
-        print(config_values_to_json(config_values))
-        return
-    TODO()
 
 def open_connection():
     init_config()
     actual_connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    host = (config["server_name"], config["server_port"])
     try:
-        actual_connection.connect((server_name, server_port))
+        actual_connection.connect(host)
     except socket.error:
-        sys.exit("ERROR: Can't connect to the wolfebin server (" + server_name + ":" + str(server_port) + ").")
+        sys.exit("ERROR: Can't connect to the wolfebin server ({}:{})".format(*host))
     return Connection(actual_connection)
 class Connection:
     def __init__(self, actual_connection):
@@ -472,7 +366,7 @@ def put_func(paths, key, name_override):
             file_handle = open(actual_path, "rb")
         try:
             def read_function():
-                chunk = file_handle.read(chunk_size)
+                chunk = file_handle.read(config["chunk_size"])
                 digester.update(chunk)
                 return chunk
             write_function = lambda chunk: connection.write(chunk)
@@ -541,7 +435,7 @@ def get_func(key, output_path):
             digester = hashlib.md5()
             def read_function():
                 # be sure to stop reading at the end of the file size
-                chunk = connection.read(min(chunk_size, file_size - local_size[0]))
+                chunk = connection.read(min(config["chunk_size"], file_size - local_size[0]))
                 local_size[0] += len(chunk)
                 digester.update(chunk)
                 return chunk
@@ -737,25 +631,6 @@ def command_line_main():
         "Install bash completion to " + bash_completion_path + ".",
     )
     commands.append(Command(install_parser, ["install", "install-bash-completion"], (0, 0), install_func))
-
-    config_parser = optparse.OptionParser(usage="\n".join([
-        "%(prog)s config [-e]",
-        "%(prog)s config [-i] [NAME [VALUE]]",
-        ]) % usage_variables, description=\
-        "Print or edit user configuration. " + \
-        "If -e is given, all other options are ignored. " + \
-        "If NAME is given, limits the scope of operation to that particular configuration option. " + \
-        "If neither -i nor VALUE are given, prints configuration options. " + \
-        "At most 1 one of -i or VALUE may be given. " + \
-        "If NAME and VALUE are given, sets the named configuration to the specified value."
-    )
-    config_parser.add_option("-e", "--edit", action="store_true", default=False, help=\
-        "Open a text editor to edit the config file manually. Equivalent to: $EDITOR " + config_path_before_user_expansion,
-    )
-    config_parser.add_option("-i", "--interactive", action="store_true", default=False, help=\
-        "Edit values interactively using stdin/stdout.",
-    )
-    commands.append(Command(config_parser, ["config"], (0, 2), config_func))
 
     usage_variables["main_names"] = "|".join(command.names[0] for command in commands)
     help_parser = optparse.OptionParser(usage="%(prog)s help [%(main_names)s]" % usage_variables, description=\
