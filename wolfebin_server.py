@@ -38,7 +38,7 @@ except ImportError:
     pass
 
 data_root = config["data_root"]
-database_path = os.path.join(data_root, "index")
+database_path = os.path.join(data_root, "index.json")
 file_data_dir = os.path.join(data_root, "files")
 def check_database():
     if os.path.exists(data_root):

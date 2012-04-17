@@ -137,7 +137,7 @@ def int_to_human_binary(number):
         number_str = str(int(number))
     return number_str + prefix
 def int_to_human_time(seconds):
-    """0s  59m59s  99h59m  100h  1000000h"""
+    """examples: 0s  59m59s  99h59m  100h  1000000h"""
     minutes = int(seconds / 60)
     seconds = seconds % 60
     hours = int(minutes / 60)
