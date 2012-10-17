@@ -68,8 +68,13 @@ def open_connection():
         sys.exit("ERROR: Can't connect to the wolfebin server ({}:{})".format(*host))
     return Connection(actual_connection)
 class Connection:
+    protocol_version = "0"
+    class Error(Exception):
+        pass
     def __init__(self, actual_connection):
         self.connection = actual_connection
+        self.sent_protocol_version = False
+        self.read_protocl_version = False
     def __del__(self):
         self.connection.close()
     def read(self, length):
@@ -89,8 +94,15 @@ class Connection:
     def read_long(self):
         return self.read_fmt(">Q")
     def read_string(self):
-        length = self.read_int()
+        length = self.read_long()
         return bytes_to_str(self.read(length))
+    def read_json(self):
+        result = json.loads(self.read_string())
+        if not self.read_protocl_version:
+            if result["protocol_version"] != Connection.protocol_version:
+                raise Connection.Error("protocol version mismatch")
+            self.read_protocl_version = True
+        return result
 
     def write(self, data):
         self.connection.sendall(data)
@@ -103,23 +115,21 @@ class Connection:
         self.write_fmt(">Q", value)
     def write_string(self, value):
         value = str_to_bytes(value)
-        self.write_int(len(value))
+        self.write_long(len(value))
         self.write(value)
+    def write_json(self, obj):
+        if not self.sent_protocol_version:
+            obj["protocol_version"] = Connection.protocol_version
+        self.write_string(json.dumps(obj))
 
     def check(self, crash_on_error=True):
-        status_code = self.read(1)
-        if status_code == str_to_bytes("w"):
-            # 'w' for "wolfebin"
+        status = self.read_json()
+        message = status.get("error", None)
+        if message == None:
             return
-        elif status_code == str_to_bytes("b"):
-            # 'b' for "bad"
-            message = self.read_string()
-            if crash_on_error:
-                sys.exit("fatal: " + message)
-            return message
-        else:
-            # always crash in this case
-            sys.exit("fatal: corrupt network communication " + repr(status_code + self.read(0xf)))
+        if crash_on_error:
+            sys.exit("fatal: " + message)
+        return message
 
 def int_to_human_binary(number):
     """like the -h switch for du. 2408358 -> 2.3M"""
@@ -390,8 +400,10 @@ def get_func(key, output_path):
     if key == None:
         key = ""
     connection = open_connection()
-    connection.write(str_to_bytes("g"))
-    connection.write_string(key)
+    connection.write_header({
+        "command": "get",
+        "key": key,
+    })
     connection.check()
     file_count = connection.read_int()
     if output_path == "-":
@@ -491,39 +503,25 @@ def delete(key):
 
 def get_key_list():
     connection = open_connection()
-    connection.write(str_to_bytes("l"))
-    connection.check()
-
-    server_version = connection.read_string()
-    list_length = connection.read_int()
-    items = []
-    for _ in range(list_length):
-        key = connection.read_string()
-        file_count = connection.read_int()
-        file_infos = []
-        for _ in range(file_count):
-            file_infos.append((connection.read_string(), connection.read_long()))
-        items.append((key, file_infos))
-    items.sort()
-    return (items, server_version)
+    connection.write_json({
+        "command": "list",
+    })
+    return connection.read_json()
 
 # the list command
-def list_func():
+def list_func(*args, **kwargs):
     specific_key = None
-    verbose = None
-    if verbose == None:
-        if specific_key == None:
-            verbose = 0
-        else:
-            verbose = 2
-    (items, server_version) = get_key_list()
-    if specific_key != None:
-        items = [(key, file_infos) for (key, file_infos) in items if key == specific_key]
-        if items == []:
-            sys.exit("ERROR: key not found: " + repr(specific_key))
-    if verbose == 0:
+    verbose = kwargs["verbose"]
+    response = get_key_list()
+    (items, server_version) = response["items"], response["version"]
+    if len(args) != 0:
+        arg_set = set(args)
+        items = [(key, file_infos) for (key, file_infos) in items if key in arg_set]
+        found_set = set(item[0] for item in items)
+        [sys.stderr.write("ERROR: key not found: %s\n" % key) for key in args if key not in found_set]
+    if not verbose:
         # key names
-        print(" ".join(repr(item[0]) for item in items))
+        print(repr([item[0] for item in items]))
         return
     print("client version: " + __version__)
     print("server version: " + server_version)
@@ -531,30 +529,21 @@ def list_func():
     max_key_len = min(max_key_len, 32)
     justifiy_size = lambda size: int_to_human_binary(size).rjust(len("1023k")) + "B"
     for (key, file_infos) in sorted(items):
+        file_infos = file_infos["files"]
         justified_key = repr(key).ljust(max_key_len)
-        total_size = sum(size for (_, size) in file_infos)
-        if verbose == 1 or len(file_infos) == 1:
-            name_part = file_infos[0][0]
-            if len(file_infos) != 1:
-                name_part += ", ..."
+        total_size = sum(file_info["size"] for file_info in file_infos)
+        print("%s %s %i files:" % (
+            justified_key,
+            justifiy_size(total_size),
+            len(file_infos),
+        ))
+        indentation = " " * (max_key_len + len(justifiy_size(0)))
+        for file_info in file_infos:
             print("%s %s %s" % (
-                justified_key,
-                justifiy_size(total_size),
-                name_part,
+                indentation,
+                justifiy_size(file_info["size"]),
+                file_info["name"],
             ))
-        elif verbose == 2:
-            print("%s %s %i files:" % (
-                justified_key,
-                justifiy_size(total_size),
-                len(file_infos),
-            ))
-            indentation = " " * (max_key_len + len(justifiy_size(0)))
-            for (file_name, file_size) in file_infos:
-                print("%s %s %s" % (
-                    indentation,
-                    justifiy_size(file_size),
-                    file_name,
-                ))
 
 bash_completion_path = "/etc/bash_completion.d/wolfebin"
 def install_func():
@@ -628,7 +617,8 @@ def command_line_main():
     list_parser = optparse.OptionParser(usage="%(prog)s list" % usage_variables, description=\
         "List exisitng keys."
     )
-    commands.append(Command(list_parser, ["list", "ls"], (0, 0), list_func))
+    list_parser.add_option("-v", "--verbose", action="store_true")
+    commands.append(Command(list_parser, ["list", "ls"], (0, float("inf")), list_func))
 
     install_parser = optparse.OptionParser(usage="sudo %(prog)s install[-bash-completion]" % usage_variables, description=\
         "Install bash completion to " + bash_completion_path + ".",

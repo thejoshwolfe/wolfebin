@@ -8,6 +8,15 @@ import hashlib
 import json
 import SocketServer
 
+import imp
+sys.dont_write_bytecode = True
+try:
+    wolfebin_path = os.path.join(os.path.dirname(__file__), "wolfebin")
+    with open(wolfebin_path) as f:
+        Connection = imp.load_source("wolfebin", wolfebin_path, f).Connection
+finally:
+    sys.dont_write_bytecode = False
+
 config_path = "config.json"
 current_config_version = 0
 config = {
@@ -26,16 +35,12 @@ def write_json(path, json_object):
         f.write("\n")
 try:
     config = read_json(config_path)
-    if config["version"] > current_config_version:
-        sys.exit("ERROR: config is too new.")
 except IOError:
     sys.stderr.write("WARNING: initializing defaults in {}\n".format(config_path))
     write_json(config_path, config)
 
-try:
-    from wolfebin_config import *
-except ImportError:
-    pass
+if config["version"] > current_config_version:
+    sys.exit("ERROR: config is too new.")
 
 data_root = config["data_root"]
 database_path = os.path.join(data_root, "index.json")
@@ -46,8 +51,7 @@ def check_database():
     sys.stderr.write("WARNING: creating new database in {}\n".format(data_root))
     os.mkdir(data_root)
     os.mkdir(file_data_dir)
-    database = {}
-    save_database(database)
+    save_database({})
 
 state_lock = threading.RLock()
 
@@ -67,48 +71,6 @@ def find_session(key):
     # should have a lock already
     return active_sessions.get(key, None)
 
-class Connection:
-    def __init__(self, actual_connection):
-        self.connection = actual_connection
-    def read(self, length):
-        chunks = []
-        while length != 0:
-            chunk = self.connection.recv(length)
-            if len(chunk) == 0:
-                break
-            chunks.append(chunk)
-            length -= len(chunk)
-        return "".join(chunks)
-    def read_fmt(self, fmt):
-        data = self.read(struct.calcsize(fmt))
-        return struct.unpack(fmt, data)[0]
-    def read_int(self):
-        return self.read_fmt(">I")
-    def read_long(self):
-        return self.read_fmt(">Q")
-    def read_string(self):
-        length = self.read_int()
-        return self.read(length)
-
-    def write(self, data):
-        self.connection.sendall(data)
-    def write_fmt(self, fmt, value):
-        data = struct.pack(fmt, value)
-        self.write(data)
-    def write_int(self, value):
-        self.write_fmt(">I", value)
-    def write_long(self, value):
-        self.write_fmt(">Q", value)
-    def write_string(self, value):
-        self.write_int(len(value))
-        self.write(value)
-    def write_error(self, message):
-        self.write("b") # 'b' for "bad"
-        self.write_string(message)
-
-    def ok(self):
-        self.write("w") # 'w' for "wolfebin"
-
 def hash_to_file_name(key_hash):
     return os.path.join(file_data_dir, key_hash)
 def key_to_hash(key):
@@ -125,7 +87,7 @@ def save_database(database):
     # caller should have a database lock
     write_json(database_path, database)
 
-def get(connection, protocol):
+def get(connection, header):
     key = connection.read_string()
     key_hash = key_to_hash(key)
     try:
@@ -223,32 +185,27 @@ def delete(connection):
 
 def list_keys(connection):
     database_items = get_database().items()
-    connection.ok()
-    connection.write_string(__version__)
-    connection.write_int(len(database_items))
-    for (key, entry) in database_items:
-        connection.write_string(key)
-        connection.write_int(len(entry["files"]))
-        for file_entry in entry["files"]:
-            connection.write_string(file_entry["name"])
-            connection.write_long(file_entry["size"])
+    connection.write_json({
+        "version": __version__,
+        "items": database_items,
+    })
 
 def server_forever():
     class ConnectionHandler(SocketServer.BaseRequestHandler):
         def handle(self):
             connection = Connection(self.request)
-            command = connection.read(1)
-            if command == "g":
-                get(connection, command)
+            request = connection.read_json()
+            command = request["command"]
+            if command == "get":
+                get(connection, request)
             elif command == "p":
-                put(connection)
+                put(connection, request)
             elif command == "d":
-                delete(connection)
-            elif command == "l":
+                delete(connection, request)
+            elif command == "list":
                 list_keys(connection)
             else:
-                sys.stderr.write("bad command: " + repr(command) + "\n")
-                connection.write("you suck")
+                connection.write_error("bad command: " + json.dumps(command))
     class ThreadedTCPServer(SocketServer.ThreadingMixIn, SocketServer.TCPServer):
         allow_reuse_address = True
     server = ThreadedTCPServer((config["host_name"], config["port_number"]), ConnectionHandler)
