@@ -24,8 +24,11 @@ elif python_version == 3:
 config_path_before_user_expansion = "~/.wolfebin/config.json"
 config_path = os.path.expanduser(config_path_before_user_expansion)
 current_config_version = 0
-def init_config():
+config = None
+def init_config(crash_on_failure=True):
     global config
+    if config != None:
+        return
     config = {
         "version": current_config_version,
         "server_name": "",
@@ -48,11 +51,16 @@ def init_config():
         config["server_port"]
         config["chunk_size"]
     except IOError:
-        sys.exit("ERROR: wolfebin is not configured. edit " + config_path_before_user_expansion)
+        if crash_on_failure:
+            sys.exit("ERROR: wolfebin is not configured. try running: wolfebin init")
     except (ValueError, KeyError):
         sys.exit("ERROR: wolfebin is corrupted. edit " + config_path_before_user_expansion)
 
 def save_config():
+    try:
+        os.makedirs(os.path.dirname(config_path))
+    except OSError:
+        pass
     with open(config_path, "w") as f:
         f.write(json.dumps(config, sort_keys=True, indent=4))
         f.write("\n")
@@ -581,6 +589,27 @@ def list_func(*args, **kwargs):
                 file_info["name"],
             ))
 
+def init_func():
+    init_config(crash_on_failure=False)
+    try:
+        previous_hostname = ""
+        if config["server_name"] != "":
+            previous_hostname = "(%s) " % config["server_name"]
+        while True:
+            hostname = raw_input("enter the hostname or I.P. address of the server.\n%s> " % previous_hostname)
+            if hostname == "":
+                hostname = config["server_name"]
+            if hostname != "":
+                break
+        config["server_name"] = hostname
+        save_config()
+        if not raw_input("test connection to %s?\n[Yn] " % hostname).lower().startswith("n"):
+            get_key_list()
+            print("it works!")
+    except KeyboardInterrupt:
+        print("")
+
+
 bash_completion_path = "/etc/bash_completion.d/wolfebin"
 def install_func():
     with open(bash_completion_path, "w") as f:
@@ -659,6 +688,11 @@ def command_line_main():
     )
     list_parser.add_option("-v", "--verbose", action="store_true")
     commands.append(Command(list_parser, ["list", "ls"], (0, float("inf")), list_func))
+
+    init_parser = optparse.OptionParser(usage="%(prog)s init" % usage_variables, description=\
+        "Interactive first-time setup.",
+    )
+    commands.append(Command(init_parser, ["init"], (0, 0), init_func))
 
     install_parser = optparse.OptionParser(usage="sudo %(prog)s install[-bash-completion]" % usage_variables, description=\
         "Install bash completion to " + bash_completion_path + ".",

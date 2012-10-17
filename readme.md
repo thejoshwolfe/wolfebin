@@ -9,6 +9,12 @@ Using the client
 
 Put `wolfebin` in your PATH. The other files here are not necessary.
 
+To configure for first-time use:
+
+```
+wolfebin init
+```
+
 To share/upload some files:
 
 ```
@@ -56,8 +62,7 @@ cd ~/wolfebin_server
 /path/to/wolfebin_server.py
 ```
 
-This will create the database in `~/wolfebin_server` or something.
+This will create a config file and the database below `~/wolfebin_server`.
 
-
-TODO: how to configure things for first time use?
-
+As with all servers, you must know your public I.P. address or setup a dns
+redirect. Then you probably need to configure port forwarding on your router.
