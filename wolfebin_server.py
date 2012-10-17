@@ -74,7 +74,7 @@ def find_session(key):
 def hash_to_file_name(key_hash):
     return os.path.join(file_data_dir, key_hash)
 def key_to_hash(key):
-    return hashlib.md5(key).hexdigest()
+    return hashlib.sha1(key).hexdigest()
 def open_file(key_hash, mode):
     return open(hash_to_file_name(key_hash), mode)
 def delete_file(key_hash):
@@ -87,8 +87,8 @@ def save_database(database):
     # caller should have a database lock
     write_json(database_path, database)
 
-def get(connection, header):
-    key = connection.read_string()
+def get(connection, request):
+    key = request["key"]
     key_hash = key_to_hash(key)
     try:
         with state_lock:
@@ -99,39 +99,52 @@ def get(connection, header):
         connection.write_error("key not found: " + repr(key))
         return
     try:
-        connection.ok()
-        # header
-        connection.write_int(len(entry["files"]))
-        for file_entry in entry["files"]:
-            connection.write_string(file_entry["name"])
-            connection.write_long(file_entry["size"])
-        while True:
-            session_is_done = session == None or session.is_done
-            chunk = file_handle.read(config["chunk_size"])
-            if len(chunk) != 0:
-                connection.write(chunk)
-                continue
-            # no more to read. will there be in a moment?
-            if session_is_done:
-                # no more to read ever.
-                break
-            # streaming buffer underflow. pause a moment and try again.
-            time.sleep(0.1)
+        connection.write_json({
+            "files": entry["files"],
+        })
+        def read_from_the_file(size):
+            read_size = 0
+            chunks = []
+            while read_size < size:
+                session_is_done = session == None or session.is_done
+                chunk = file_handle.read(size - read_size)
+                if len(chunk) != 0:
+                    chunks.append(chunk)
+                    read_size += len(chunk)
+                    continue
+                # no more to read. will there be in a moment?
+                if session_is_done:
+                    # no more to read ever.
+                    break
+                # streaming buffer underflow. pause a moment and try again.
+                time.sleep(0.1)
+            return "".join(chunks)
+
+        for file_info in entry["files"]:
+            file_size = file_info["size"]
+            written_size = 0
+            while written_size < file_size:
+                chunk = read_from_the_file(min(config["chunk_size"], file_size - written_size))
+                if len(chunk) == 0:
+                    # incomplete
+                    return
+                connection.write_binary_chunk(chunk)
+                written_size += len(chunk)
+            checksum = read_from_the_file(len(hashlib.sha1().hexdigest()))
+            connection.write_json({
+                "sha1": checksum,
+            })
     finally:
         file_handle.close()
 
-def put(connection):
-    key = connection.read_string()
-    connection.ok()
+def put(connection, request):
+    key = request["key"]
     key_hash = key_to_hash(key)
-    file_count = connection.read_int()
     entry = {
-        "files": [
-            {
-                "name": connection.read_string(),
-                "size": connection.read_long()
-            }
-        for _ in range(file_count)],
+        "files": [{
+            "name": file_info["name"] + "",
+            "size": file_info["size"] + 0,
+        } for file_info in request["files"]],
     }
     with state_lock:
         database = get_database()
@@ -145,43 +158,44 @@ def put(connection):
         file_handle = open_file(key_hash, "wb")
         session = Session(key)
     try:
-        for file_entry in entry["files"]:
-            file_size = file_entry["size"]
+        for file_info in entry["files"]:
+            file_size = file_info["size"]
             thus_far = 0
-            digester = hashlib.md5()
+            digester = hashlib.sha1()
             while thus_far < file_size:
-                read_size = min(config["chunk_size"], file_size - thus_far)
-                chunk = connection.read(read_size)
-                if len(chunk) == 0:
-                    return # incomplete upload
+                chunk = connection.read_binary_chunk()
                 file_handle.write(chunk)
                 digester.update(chunk)
                 thus_far += len(chunk)
-            # check the md5
-            md5sum = digester.hexdigest()
-            supposed_md5sum = connection.read(len(md5sum))
-            if md5sum == supposed_md5sum:
-                connection.ok()
+            # checksum
+            checksum = digester.hexdigest()
+            supposed_checksum = connection.read_json()["sha1"]
+            if checksum == supposed_checksum:
+                connection.write_json({})
             else:
-                connection.write_error("")
-            file_handle.write(md5sum)
+                connection.write_warning("Checksum failed for {}".format(repr(file_info["name"])))
+            file_handle.write(checksum)
     finally:
         file_handle.close()
         session.done()
 
-def delete(connection):
-    key = connection.read_string()
-    key_hash = key_to_hash(key)
-    try:
-        with state_lock:
+def delete(connection, request):
+    missing_keys = []
+    with state_lock:
+        for key in request["keys"]:
+            key_hash = key_to_hash(key)
             database = get_database()
-            del database[key]
+            try:
+                del database[key]
+            except KeyError:
+                missing_keys.append(key)
+                continue
             delete_file(key_hash)
             save_database(database)
-    except KeyError:
-        connection.write_error("key not found: " + repr(key))
-        return
-    connection.ok()
+    if len(missing_keys) != 0:
+        connection.write_error("\n".join("key not found: " + repr(key) for key in missing_keys))
+    else:
+        connection.write_json({})
 
 def list_keys(connection):
     database_items = get_database().items()
@@ -198,9 +212,9 @@ def server_forever():
             command = request["command"]
             if command == "get":
                 get(connection, request)
-            elif command == "p":
+            elif command == "put":
                 put(connection, request)
-            elif command == "d":
+            elif command == "delete":
                 delete(connection, request)
             elif command == "list":
                 list_keys(connection)

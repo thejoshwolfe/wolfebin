@@ -19,7 +19,6 @@ elif python_version == 3:
     bytes_to_str = lambda s: str(s, "utf8")
     str_to_bytes = lambda s: bytes(s, "utf8")
     coerce_unicode_to_str = lambda s: s
-md5sum_len = len(str_to_bytes(hashlib.md5().hexdigest()))
 
 # config
 config_path_before_user_expansion = "~/.wolfebin/config.json"
@@ -77,7 +76,7 @@ class Connection:
         self.read_protocl_version = False
     def __del__(self):
         self.connection.close()
-    def read(self, length):
+    def _read(self, length):
         chunks = []
         while length != 0:
             chunk = self.connection.recv(length)
@@ -86,50 +85,71 @@ class Connection:
             chunks.append(chunk)
             length -= len(chunk)
         return str_to_bytes("").join(chunks)
-    def read_fmt(self, fmt):
-        data = self.read(struct.calcsize(fmt))
+    def _read_fmt(self, fmt):
+        data = self._read(struct.calcsize(fmt))
         return struct.unpack(fmt, data)[0]
-    def read_int(self):
-        return self.read_fmt(">I")
-    def read_long(self):
-        return self.read_fmt(">Q")
-    def read_string(self):
-        length = self.read_long()
-        return bytes_to_str(self.read(length))
-    def read_json(self):
-        result = json.loads(self.read_string())
+    def _read_long(self):
+        return self._read_fmt(">Q")
+    def _read_string(self):
+        length = self._read_long()
+        return bytes_to_str(self._read(length))
+    def read_json(self, pre_warning_func=lambda:None):
+        result = json.loads(self._read_string())
+
         if not self.read_protocl_version:
             if result["protocol_version"] != Connection.protocol_version:
                 raise Connection.Error("protocol version mismatch")
             self.read_protocl_version = True
-        return result
 
-    def write(self, data):
+        try:
+            error_message = result["error"]
+        except KeyError:
+            pass
+        else:
+            raise Connection.Error(error_message)
+
+        try:
+            warning_message = result["warning"]
+        except KeyError:
+            pass
+        else:
+            pre_warning_func()
+            sys.stderr.write("WARNING: %s\n" % warning_message)
+
+        return result
+    def read_binary_chunk(self):
+        return self._read(self.read_json()["__bin_len__"])
+
+    def _write(self, data):
         self.connection.sendall(data)
-    def write_fmt(self, fmt, value):
+    def _write_fmt(self, fmt, value):
         data = struct.pack(fmt, value)
-        self.write(data)
-    def write_int(self, value):
-        self.write_fmt(">I", value)
-    def write_long(self, value):
-        self.write_fmt(">Q", value)
-    def write_string(self, value):
+        self._write(data)
+    def _write_long(self, value):
+        self._write_fmt(">Q", value)
+    def _write_string(self, value):
         value = str_to_bytes(value)
-        self.write_long(len(value))
-        self.write(value)
+        self._write_long(len(value))
+        self._write(value)
     def write_json(self, obj):
         if not self.sent_protocol_version:
             obj["protocol_version"] = Connection.protocol_version
-        self.write_string(json.dumps(obj))
-
-    def check(self, crash_on_error=True):
-        status = self.read_json()
-        message = status.get("error", None)
-        if message == None:
-            return
-        if crash_on_error:
-            sys.exit("fatal: " + message)
-        return message
+            self.sent_protocol_version = True
+        self._write_string(json.dumps(obj))
+    def write_error(self, message):
+        self.write_json({
+            "error": message,
+        })
+    def write_warning(self, message):
+        self.write_json({
+            "warning": message,
+        })
+    def write_binary_chunk(self, chunk):
+        self.write_json({
+            "__bin_len__": len(chunk),
+        })
+        if len(chunk) != 0:
+            self._write(chunk)
 
 def int_to_human_binary(number):
     """like the -h switch for du. 2408358 -> 2.3M"""
@@ -198,7 +218,10 @@ def progress(thus_far, eventual_total, time_tracker, banner_text):
 
     # percent
     percent_space = len("%100.0")
-    percent = 100.0 * thus_far / eventual_total
+    try:
+        percent = 100.0 * thus_far / eventual_total
+    except ZeroDivisionError:
+        percent = 100.0
     percent_str = ("%%%.1f" % percent).rjust(percent_space)
     line = " " + percent_str + line
 
@@ -206,7 +229,10 @@ def progress(thus_far, eventual_total, time_tracker, banner_text):
     console_width = get_terminal_size()[1] - 1
     bar_space = console_width - len(line)
     tick_count = bar_space - len("[>]")
-    done_count = int(tick_count * thus_far / eventual_total)
+    try:
+        done_count = int(tick_count * thus_far / eventual_total)
+    except ZeroDivisionError:
+        done_count = tick_count
     todo_count = tick_count - done_count
     if done_count == 0:
         arrow = ""
@@ -285,8 +311,7 @@ def put_func(paths, key, name_override):
         if any(c in illegal_chars for c in name_override) or name_override in illegal_names:
             sys.exit("ERROR: illegal name: " + repr(name_override))
 
-    input_is_stdin = False
-    if paths == ["-"]:
+    if paths == ("-",):
         # gotta read entire contents to get the size
         file_contents = str_to_bytes(sys.stdin.read())
         file_name = name_override
@@ -294,8 +319,11 @@ def put_func(paths, key, name_override):
             # make up some name
             file_name = "wolfebin-stdin.tmp"
         size = len(file_contents)
-        file_infos = [(file_name, size, file_contents)]
-        input_is_stdin = True
+        file_infos = [{
+            "name": file_name,
+            "size": size,
+            "contents": file_contents,
+        }]
     else:
         # separate paths into files and directories
         specific_files = []
@@ -336,7 +364,11 @@ def put_func(paths, key, name_override):
                 else:
                     reported_name = name_override + "/" + reported_name
             size = os.path.getsize(specific_file)
-            file_infos.append((reported_name, size, specific_file))
+            file_infos.append({
+                "name": reported_name,
+                "size": size,
+                "path": specific_file,
+            })
         for specific_dir in specific_dirs:
             # keep paths starting with the specific directory's name
             chop_off_this_many_parts_from_paths = len(full_split(specific_dir)) - 1
@@ -350,72 +382,68 @@ def put_func(paths, key, name_override):
                     if name_override != "":
                         reported_name = name_override + "/" + reported_name
                     size = os.path.getsize(actual_path)
-                    file_infos.append((reported_name, size, actual_path))
-    file_infos.sort()
+                    file_infos.append({
+                        "name": reported_name,
+                        "size": size,
+                        "path": actual_path,
+                    })
+    file_infos.sort(key=lambda file_info: file_info["name"])
 
     # now we're ready to talk to the server
     connection = open_connection()
-    connection.write(str_to_bytes("p"))
-    connection.write_string(key)
-    connection.check()
+    connection.write_json({
+        "command": "put",
+        "key": key,
+        "files": [{
+            "name": file_info["name"],
+            "size": file_info["size"],
+        } for file_info in file_infos],
+    })
 
-    connection.write_int(len(file_infos))
-    for file_name, file_size, actual_path in file_infos:
-        connection.write_string(file_name)
-        connection.write_long(file_size)
-
-    total_size = sum(size + md5sum_len for (_, size, _) in file_infos)
+    total_size = sum(file_info["size"] for file_info in file_infos)
     thus_far = 0
     time_tracker = {}
-    for file_name, file_size, actual_path in file_infos:
-        digester = hashlib.md5()
-        if input_is_stdin:
-            # reinterpret the tuple a little
-            file_contents = actual_path
-            file_handle = StringIO(file_contents)
-        else:
-            file_handle = open(actual_path, "rb")
+    for file_info in file_infos:
+        file_name = file_info["name"]
+        digester = hashlib.sha1()
+        try:
+            file_handle = open(file_info["path"], "rb")
+        except KeyError:
+            file_handle = StringIO(file_info["contents"])
         try:
             def read_function():
                 chunk = file_handle.read(config["chunk_size"])
                 digester.update(chunk)
                 return chunk
-            write_function = lambda chunk: connection.write(chunk)
+            write_function = connection.write_binary_chunk
             thus_far = progress_loop(read_function, write_function, thus_far, total_size, time_tracker, file_name)
         finally:
             file_handle.close()
-        connection.write(str_to_bytes(digester.hexdigest()))
-        thus_far += md5sum_len
-        progress(thus_far, total_size, time_tracker, file_name)
-        if connection.check(crash_on_error=False) != None:
-            progress_clear()
-            if len(file_infos) == 1:
-                sys.stderr.write("WARNING: checksum failed\n")
-            else:
-                sys.stderr.write("WARNING: checksum failed for %s\n" % repr(file_name))
+        connection.write_json({
+            "sha1": digester.hexdigest(),
+        })
+        connection.read_json(pre_warning_func=progress_clear)
     progress_done()
 
 # the get command
-def get_func(key, output_path):
-    if key == None:
-        key = ""
-    connection = open_connection()
-    connection.write_header({
-        "command": "get",
-        "key": key,
-    })
-    connection.check()
-    file_count = connection.read_int()
+def get_func(*keys, **kwargs):
+    if len(keys) == 0:
+        keys = [""]
+    if len(keys) != 1:
+        sys.exit("ERROR: TODO: support 'get' with multiple keys")
+    [key] = keys
+    output_path = kwargs["output"]
     if output_path == "-":
         global should_print_to_stdout
         should_print_to_stdout = False
-        if file_count != 1:
-            sys.exit("ERROR: can only write 1 file to stdout. download includes %i files." % file_count)
-    file_infos = []
-    for _ in range(file_count):
-        file_infos.append((connection.read_string(), connection.read_long()))
-    total_size = sum(size + md5sum_len for (_, size) in file_infos)
-    root_set = set(full_split(file_name)[0] for (file_name, _) in file_infos)
+    connection = open_connection()
+    connection.write_json({
+        "command": "get",
+        "key": key,
+    })
+    file_infos = connection.read_json()["files"]
+
+    root_set = set(full_split(file_info["name"])[0] for file_info in file_infos)
     output_is_stdout = False
     output_prefix = None
     output_override = None
@@ -429,11 +457,15 @@ def get_func(key, output_path):
         # "./" looks ugly
         output_prefix = None
 
+    total_size = sum(file_info["size"] for file_info in file_infos)
+
     started = []
     completed_count = 0
     thus_far = 0
     time_tracker = {}
-    for (file_name, file_size) in file_infos:
+    for file_info in file_infos:
+        file_name = file_info["name"]
+        file_size = file_info["size"]
         if output_is_stdout:
             output_handle = sys.stdout
         else:
@@ -447,10 +479,11 @@ def get_func(key, output_path):
             output_handle = open(file_name, "wb")
         try:
             local_size = [0]
-            digester = hashlib.md5()
+            digester = hashlib.sha1()
             def read_function():
-                # be sure to stop reading at the end of the file size
-                chunk = connection.read(min(config["chunk_size"], file_size - local_size[0]))
+                if local_size[0] == file_size:
+                    return []
+                chunk = connection.read_binary_chunk()
                 local_size[0] += len(chunk)
                 digester.update(chunk)
                 return chunk
@@ -462,15 +495,14 @@ def get_func(key, output_path):
         if local_size[0] != file_size:
             # incomplete
             break
-        # check the md5
-        md5sum = bytes_to_str(connection.read(md5sum_len))
-        if md5sum != digester.hexdigest():
+        # checksum
+        checksum = connection.read_json()["sha1"]
+        if checksum != digester.hexdigest():
             progress_clear()
             if len(file_infos) == 1:
                 sys.stderr.write("WARNING: checksum failed\n")
             else:
                 sys.stderr.write("WARNING: checksum failed for %s\n" % repr(file_name))
-        thus_far += len(md5sum)
         progress(thus_far, total_size, time_tracker, file_name)
         completed_count += 1
     progress_done()
@@ -490,16 +522,20 @@ def get_func(key, output_path):
 
 should_print_to_stdout = True
 def write_to_stdout_maybe(msg):
-    if should_print_to_stdout:
-        sys.stdout.write(msg)
-        sys.stdout.flush()
+    stream = sys.stdout
+    if not should_print_to_stdout:
+        stream = sys.stderr
+    stream.write(msg)
+    stream.flush()
 
 # the delete command
-def delete(key):
+def delete_func(*keys):
     connection = open_connection()
-    connection.write(str_to_bytes("d"))
-    connection.write_string(key)
-    connection.check()
+    connection.write_json({
+        "command": "delete",
+        "keys": keys,
+    })
+    connection.read_json()
 
 def get_key_list():
     connection = open_connection()
@@ -591,16 +627,15 @@ def command_line_main():
         "the default is \"\"."
     }
 
-    get_parser = optparse.OptionParser(usage="%(prog)s get [-k KEY] [-o PATH]" % usage_variables, description=\
-        "Download something."
+    get_parser = optparse.OptionParser(usage="%(prog)s get [KEY...] [-o PATH]" % usage_variables, description=\
+        "Download something. If KEY... is omitted, it defaults to \"\"."
     )
-    get_parser.add_option(*key_args, **key_kwargs)
-    get_parser.add_option("-o", "--output", metavar="PATH", dest="output_path", default=".", help=\
+    get_parser.add_option("-o", "--output", metavar="PATH", default=".", help=\
         "write file into PATH. if PATH is a directory, uses the file's " + \
         "original name in the directory. otherwise, uses PATH as the file " + \
         "to save to. default is \".\"."
     )
-    commands.append(Command(get_parser, ["get"], (0, 0), get_func))
+    commands.append(Command(get_parser, ["get"], (0, float("inf")), get_func))
 
     put_parser = optparse.OptionParser(usage="%(prog)s put [-k KEY] [-n NAME] file..." % usage_variables, description=\
         "Upload something."
@@ -612,7 +647,12 @@ def command_line_main():
         "if a single directory is given, this option is the new name of the directory. " + \
         "if multiple files/directories are given, this option encloses them in a directory."
     )
-    commands.append(Command(put_parser, ["put"], (0, float("inf")), lambda *args, **kwargs: put_func(args, **kwargs)))
+    commands.append(Command(put_parser, ["put"], (1, float("inf")), lambda *args, **kwargs: put_func(args, **kwargs)))
+
+    delete_parser = optparse.OptionParser(usage="%(prog)s delete KEY..." % usage_variables, description=\
+        "Delete the entries with the specified keys."
+    )
+    commands.append(Command(delete_parser, ["delete"], (1, float("inf")), delete_func))
 
     list_parser = optparse.OptionParser(usage="%(prog)s list" % usage_variables, description=\
         "List exisitng keys."
@@ -746,7 +786,10 @@ def command_line_main():
     (options, args) = command.parser.parse_args(args)
     if len(args) < command.args_range[0] or len(args) > command.args_range[1]:
         sys.exit("Wrong number of arguments for command '" + command_name + "'.")
-    command.func(*args, **options.__dict__)
+    try:
+        command.func(*args, **options.__dict__)
+    except Connection.Error as e:
+        print("\n".join("ERROR: " + line for line in e.args[0].split("\n")))
 
 if __name__ == "__main__":
     command_line_main()
