@@ -21,7 +21,7 @@ config_path = "config.json"
 current_config_version = 0
 config = {
     "version": current_config_version,
-    "host_name": "localhost",
+    "host_name": "0.0.0.0",
     "port_number": 55247,
     "chunk_size": 0x1000,
     "data_root": "wolfebin_data",
