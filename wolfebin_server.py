@@ -16,16 +16,17 @@ try:
         wolfebin_source = f.read()
     Connection = wolfebin.Connection
     __version__ = wolfebin.__version__
+    default_port = wolfebin.default_port
+    chunk_size = wolfebin.chunk_size
 finally:
     sys.dont_write_bytecode = False
 
 config_path = "config.json"
-current_config_version = 0
+current_config_version = 1
 config = {
     "version": current_config_version,
     "host_name": "0.0.0.0",
-    "port_number": 55247,
-    "chunk_size": 0x1000,
+    "port_number": default_port,
     "data_root": "wolfebin_data",
 }
 def read_json(path):
@@ -84,7 +85,8 @@ def delete_file(key_hash):
 
 def get_database():
     # lock the database in case the caller didn't
-    return read_json(database_path)
+    with state_lock:
+        return read_json(database_path)
 def save_database(database):
     # caller should have a database lock
     write_json(database_path, database)
@@ -126,7 +128,7 @@ def get(connection, request):
             file_size = file_info["size"]
             written_size = 0
             while written_size < file_size:
-                chunk = read_from_the_file(min(config["chunk_size"], file_size - written_size))
+                chunk = read_from_the_file(min(chunk_size, file_size - written_size))
                 if len(chunk) == 0:
                     # incomplete
                     return
@@ -148,22 +150,87 @@ def put(connection, request):
             "size": file_info["size"] + 0,
         } for file_info in request["files"]],
     }
-    with state_lock:
-        database = get_database()
-        database[key] = entry
-        save_database(database)
-        # prevent two open write handles to the same file
+    def attempt_continue():
+        if not request.get("attempt_continue", False):
+            return None
         try:
-            delete_file(key_hash)
-        except OSError:
-            pass
-        file_handle = open_file(key_hash, "wb")
+            if get_database()[key] != entry:
+                raise KeyError
+        except KeyError:
+            connection.write_json({
+                "continue_start": -1,
+            })
+            return None
+        good = False
+        file_handle = open_file(key_hash, "r+b")
+        try:
+            file_handle.seek(0, 2)
+            existing_size = file_handle.tell()
+            connection.write_json({
+                "continue_start": existing_size,
+            })
+            # now let's check the existing contents
+            file_handle.seek(0)
+            digester = hashlib.sha1()
+            thus_far = 0
+            while thus_far < existing_size:
+                chunk = file_handle.read(chunk_size)
+                if len(chunk) == 0:
+                    raise SHOULDNT_HAPPEN
+                thus_far += len(chunk)
+                digester.update(chunk)
+            # now, let's see if we match
+            client_checksum = connection.read_json()["continue_sha1"]
+            if digester.hexdigest() == client_checksum:
+                good = True
+            connection.write_json({
+                "continue_good": good,
+            })
+            if good:
+                return file_handle
+            print("starting over")
+            return None
+        finally:
+            if not good:
+                file_handle.close()
+    file_handle = attempt_continue()
+    with state_lock:
+        if file_handle == None:
+            database = get_database()
+            database[key] = entry
+            save_database(database)
+            # prevent two open write handles to the same file
+            try:
+                delete_file(key_hash)
+            except OSError:
+                pass
+            file_handle = open_file(key_hash, "wb")
         session = Session(key)
     try:
+        head_start = file_handle.tell()
+        skipped_total = 0
         for file_info in entry["files"]:
             file_size = file_info["size"]
+            file_size_including_checksum = file_size + len(hashlib.sha1().hexdigest())
             thus_far = 0
             digester = hashlib.sha1()
+            if skipped_total < head_start:
+                # there's something to skip
+                if skipped_total + file_size_including_checksum <= head_start:
+                    # skip the whole file
+                    skipped_total += file_size_including_checksum
+                    continue
+                else:
+                    # we can skip part of the file
+                    # initialize the digester probperly before we go on
+                    file_handle.seek(skipped_total)
+                    while skipped_total < head_start:
+                        chunk = file_handle.read(chunk_size)
+                        if len(chunk) == 0:
+                            raise SHOULDNT_HAPPEN
+                        digester.update(chunk)
+                        skipped_total += len(chunk)
+                        thus_far += len(chunk)
             while thus_far < file_size:
                 chunk = connection.read_binary_chunk()
                 file_handle.write(chunk)

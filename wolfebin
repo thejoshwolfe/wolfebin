@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-__version__ = "5.1"
+__version__ = "5.2"
 
 import sys, os
 import time, struct
@@ -25,6 +25,8 @@ config_path_before_user_expansion = "~/.wolfebin/config.json"
 config_path = os.path.expanduser(config_path_before_user_expansion)
 current_config_version = 0
 config = None
+default_port = 55247
+chunk_size = 0x10000
 def init_config(crash_on_failure=True):
     global config
     if config != None:
@@ -32,8 +34,7 @@ def init_config(crash_on_failure=True):
     config = {
         "version": current_config_version,
         "server_name": "",
-        "server_port": 55247,
-        "chunk_size": 0x10000,
+        "server_port": default_port,
     }
     try:
         try:
@@ -49,7 +50,6 @@ def init_config(crash_on_failure=True):
         if config["server_name"] == "":
             raise IOError
         config["server_port"]
-        config["chunk_size"]
     except IOError:
         if crash_on_failure:
             sys.exit("ERROR: wolfebin is not configured. try running: wolfebin init")
@@ -300,8 +300,6 @@ def full_split(path):
 
 # the put command
 def put_func(paths, key, name_override):
-    if key == None:
-        key = ""
     # validate name_override
     if name_override != "":
         # not totally thorough
@@ -397,31 +395,84 @@ def put_func(paths, key, name_override):
             "name": file_info["name"],
             "size": file_info["size"],
         } for file_info in file_infos],
+        "attempt_continue": True,
     })
 
+    continue_start = connection.read_json()["continue_start"]
+    continuing = [continue_start != -1]
+    continue_digester = hashlib.sha1()
+    continue_skipped = [0]
     total_size = sum(file_info["size"] for file_info in file_infos)
-    thus_far = 0
-    time_tracker = {}
-    for file_info in file_infos:
-        file_name = file_info["name"]
-        digester = hashlib.sha1()
-        try:
-            file_handle = open(file_info["path"], "rb")
-        except KeyError:
-            file_handle = StringIO(file_info["contents"])
-        try:
-            def read_function():
-                chunk = file_handle.read(config["chunk_size"])
-                digester.update(chunk)
-                return chunk
-            write_function = connection.write_binary_chunk
-            thus_far = progress_loop(read_function, write_function, thus_far, total_size, time_tracker, file_name)
-        finally:
-            file_handle.close()
-        connection.write_json({
-            "sha1": digester.hexdigest(),
-        })
-        connection.read_json(pre_warning_func=progress_clear)
+    if continuing[0]:
+        total_size_including_checksums = total_size + len(hashlib.sha1().hexdigest()) * len(file_infos)
+        if continue_start == total_size_including_checksums:
+            print("verifying that we already uploaded this")
+        else:
+            print("attempting to continue where we left off")
+
+    start_over = [True]
+    while start_over[0]:
+        start_over = [False]
+        thus_far = 0
+        time_tracker = {}
+        for file_info in file_infos:
+            file_name = file_info["name"]
+            digester = hashlib.sha1()
+            try:
+                file_handle = open(file_info["path"], "rb")
+            except KeyError:
+                file_handle = StringIO(file_info["contents"])
+            try:
+                def read_function():
+                    if start_over[0]:
+                        return []
+                    chunk = file_handle.read(chunk_size)
+                    digester.update(chunk)
+                    return chunk
+                def skip_chunk(chunk):
+                    if not continuing[0]:
+                        return chunk
+                    continue_chunk = chunk[:min(len(chunk), continue_start - continue_skipped[0])]
+                    continue_skipped[0] += len(continue_chunk)
+                    continue_digester.update(continue_chunk)
+                    if continue_skipped[0] < continue_start:
+                        return ""
+                    continuing[0] = False
+                    # check if this was the right stuff
+                    connection.write_json({
+                        "continue_sha1": continue_digester.hexdigest(),
+                    })
+                    good = connection.read_json()["continue_good"]
+                    if not good:
+                        # start over
+                        progress_clear()
+                        print("something changed. uploading normally.")
+                        start_over[0] = True
+                        return ""
+                    # continuing worked!
+                    if continue_start != total_size_including_checksums:
+                        progress_clear()
+                        print("now starting the real upload")
+                    # make sure we get the rest of this chunk
+                    return chunk[len(continue_chunk):]
+                def write_function(chunk):
+                    chunk = skip_chunk(chunk)
+                    if len(chunk) != 0:
+                        connection.write_binary_chunk(chunk)
+                thus_far = progress_loop(read_function, write_function, thus_far, total_size, time_tracker, file_name)
+                if start_over[0]:
+                    break
+            finally:
+                file_handle.close()
+            if continuing[0]:
+                skip_chunk(digester.hexdigest())
+                if start_over[0]:
+                    break
+            else:
+                connection.write_json({
+                    "sha1": digester.hexdigest(),
+                })
+                connection.read_json(pre_warning_func=progress_clear)
     progress_done()
 
 # the get command
@@ -541,14 +592,13 @@ def get_key_list():
     connection.write_json({
         "command": "list",
     })
-    return connection.read_json()
+    return connection.read_json()["items"]
 
 # the list command
 def list_func(*args, **kwargs):
     specific_key = None
     verbose = kwargs["verbose"]
-    response = get_key_list()
-    items = response["items"]
+    items = get_key_list()
     if len(args) != 0:
         arg_set = set(args)
         items = [(key, file_infos) for (key, file_infos) in items if key in arg_set]
@@ -681,7 +731,7 @@ def command_line_main():
     put_parser = optparse.OptionParser(usage="%(prog)s [put] [-k KEY] [-n NAME] file..." % usage_variables, description=\
         "Upload something."
     )
-    put_parser.add_option("-k", "--key", metavar="KEY", help=\
+    put_parser.add_option("-k", "--key", metavar="KEY", default="", help=\
         "use a special identifier to not override the default slot. " + \
         "download it later using the same key. " + \
         "if omitted, the default key is \"\"."
@@ -763,7 +813,7 @@ def command_line_main():
             # it's not a switch
             previous_word = words[words_index - 1]
             def get_just_the_keys():
-                return (item[0] for item in get_key_list()["items"])
+                return (item[0] for item in get_key_list())
             if previous_word.startswith("-"):
                 # previous word was a switch
                 try:
