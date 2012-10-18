@@ -680,7 +680,7 @@ def command_line_main():
     )
     commands.append(Command(delete_parser, ["delete"], (1, float("inf")), delete_func))
 
-    list_parser = optparse.OptionParser(usage="%(prog)s list" % usage_variables, description=\
+    list_parser = optparse.OptionParser(usage="%(prog)s list [KEY...]" % usage_variables, description=\
         "List exisitng keys."
     )
     list_parser.add_option("-v", "--verbose", action="store_true")
@@ -733,6 +733,8 @@ def command_line_main():
                 return name_to_option.keys()
             # it's not a switch
             previous_word = words[words_index - 1]
+            def get_just_the_keys():
+                return (item[0] for item in get_key_list()["items"])
             if previous_word.startswith("-"):
                 # previous word was a switch
                 try:
@@ -740,9 +742,18 @@ def command_line_main():
                 except KeyError:
                     # can't help you
                     return ()
-                if option.metavar == "KEY":
-                    # do a list to find out how to complete this
-                    return (item[0] for item in get_key_list()[0])
+                if option.takes_value():
+                    if option.metavar == "KEY":
+                        # do a list to find out how to complete this
+                        return get_just_the_keys()
+                    # can't help you with the value for this switch
+                    return ()
+                # the switch doesn't take a value, so nevermind
+            # asking for completion on just a regular arg
+            if command.parser.usage.find("KEY...") != -1:
+                # args are keys. we can help.
+                return get_just_the_keys()
+            # you're probably just looking for files
             return ()
 
         line_index = int(args[0])
