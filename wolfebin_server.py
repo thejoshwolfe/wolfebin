@@ -1,7 +1,5 @@
 #!/usr/bin/env python
 
-__version__ = "5.0"
-
 import os, sys
 import struct, threading, time
 import hashlib
@@ -13,7 +11,11 @@ sys.dont_write_bytecode = True
 try:
     wolfebin_path = os.path.join(os.path.dirname(__file__), "wolfebin")
     with open(wolfebin_path) as f:
-        Connection = imp.load_source("wolfebin", wolfebin_path, f).Connection
+        wolfebin = imp.load_source("wolfebin", wolfebin_path, f)
+        f.seek(0)
+        wolfebin_source = f.read()
+    Connection = wolfebin.Connection
+    __version__ = wolfebin.__version__
 finally:
     sys.dont_write_bytecode = False
 
@@ -200,8 +202,12 @@ def delete(connection, request):
 def list_keys(connection):
     database_items = get_database().items()
     connection.write_json({
-        "version": __version__,
         "items": database_items,
+    })
+
+def upgrade(connection):
+    connection.write_json({
+        "wolfebin": wolfebin_source,
     })
 
 def server_forever():
@@ -209,7 +215,11 @@ def server_forever():
         def handle(self):
             connection = Connection(self.request)
             request = connection.read_json()
-            command = request["command"]
+            try:
+                command = request["command"]
+            except KeyError:
+                connection.write_json({})
+                return
             if command == "get":
                 get(connection, request)
             elif command == "put":
@@ -218,6 +228,8 @@ def server_forever():
                 delete(connection, request)
             elif command == "list":
                 list_keys(connection)
+            elif command == "upgrade":
+                upgrade(connection)
             else:
                 connection.write_error("bad command: " + json.dumps(command))
     class ThreadedTCPServer(SocketServer.ThreadingMixIn, SocketServer.TCPServer):

@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-__version__ = "5.0"
+__version__ = "5.1"
 
 import sys, os
 import time, struct
@@ -75,13 +75,10 @@ def open_connection():
         sys.exit("ERROR: Can't connect to the wolfebin server ({}:{})".format(*host))
     return Connection(actual_connection)
 class Connection:
-    protocol_version = "0"
     class Error(Exception):
         pass
     def __init__(self, actual_connection):
         self.connection = actual_connection
-        self.sent_protocol_version = False
-        self.read_protocl_version = False
     def __del__(self):
         self.connection.close()
     def _read(self, length):
@@ -103,11 +100,7 @@ class Connection:
         return bytes_to_str(self._read(length))
     def read_json(self, pre_warning_func=lambda:None):
         result = json.loads(self._read_string())
-
-        if not self.read_protocl_version:
-            if result["protocol_version"] != Connection.protocol_version:
-                raise Connection.Error("protocol version mismatch")
-            self.read_protocl_version = True
+        self.other_version = result["version"]
 
         try:
             error_message = result["error"]
@@ -140,9 +133,7 @@ class Connection:
         self._write_long(len(value))
         self._write(value)
     def write_json(self, obj):
-        if not self.sent_protocol_version:
-            obj["protocol_version"] = Connection.protocol_version
-            self.sent_protocol_version = True
+        obj["version"] = __version__
         self._write_string(json.dumps(obj))
     def write_error(self, message):
         self.write_json({
@@ -557,7 +548,7 @@ def list_func(*args, **kwargs):
     specific_key = None
     verbose = kwargs["verbose"]
     response = get_key_list()
-    (items, server_version) = response["items"], response["version"]
+    items = response["items"]
     if len(args) != 0:
         arg_set = set(args)
         items = [(key, file_infos) for (key, file_infos) in items if key in arg_set]
@@ -567,8 +558,6 @@ def list_func(*args, **kwargs):
         # key names
         print(repr([item[0] for item in items]))
         return
-    print("client version: " + __version__)
-    print("server version: " + server_version)
     max_key_len = max(len(repr(item[0])) for item in items)
     max_key_len = min(max_key_len, 32)
     justifiy_size = lambda size: int_to_human_binary(size).rjust(len("1023k")) + "B"
@@ -635,6 +624,36 @@ _wolfebin()
 complete -F _wolfebin -o default wolfebin
 """)
 
+version_to_tuple = lambda version: tuple(int(x) for x in version.split("."))
+def version_func():
+    print("client version: " + __version__)
+    connection = open_connection()
+    connection.write_json({})
+    connection.read_json()
+    server_version = connection.other_version
+    print("server version: " + server_version)
+    if version_to_tuple(__version__) < version_to_tuple(server_version):
+        print("try the 'upgrade' command to update your client to the latest version.")
+
+
+def upgrade_func():
+    connection = open_connection()
+    connection.write_json({
+        "command": "upgrade",
+    })
+    wolfebin_source = connection.read_json()["wolfebin"]
+    ours = version_to_tuple(__version__)
+    theirs = version_to_tuple(connection.other_version)
+    if ours == theirs:
+        print("already up to date")
+        return
+    if ours > theirs:
+        sys.exit("ERROR: server version is older than client version")
+    path_to_self = os.path.realpath(sys.argv[0])
+    print("updating: " + path_to_self)
+    with open(path_to_self, "w") as f:
+        f.write(wolfebin_source)
+
 prog = "wolfebin"
 def command_line_main():
     import optparse
@@ -695,6 +714,16 @@ def command_line_main():
         "Install bash completion to " + bash_completion_path + ".",
     )
     commands.append(Command(install_parser, ["install", "install-bash-completion"], (0, 0), install_func))
+
+    version_parser = optparse.OptionParser(usage="%(prog)s version" % usage_variables, description=\
+        "query the server version, and offer the possibility of upgrading this client.",
+    )
+    commands.append(Command(version_parser, ["version"], (0, 0), version_func))
+
+    upgrade_parser = optparse.OptionParser(usage="%(prog)s upgrade" % usage_variables, description=\
+        "upgrade this client if it's older than the one provided by the server.",
+    )
+    commands.append(Command(upgrade_parser, ["upgrade", "update"], (0, 0), upgrade_func))
 
     usage_variables["main_names"] = "|".join(command.names[0] for command in commands)
     help_parser = optparse.OptionParser(usage="%(prog)s help [%(main_names)s]" % usage_variables, description=\
