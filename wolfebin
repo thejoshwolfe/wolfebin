@@ -792,7 +792,7 @@ def command_line_main():
         sys.exit(1)
     commands.append(Command(help_parser, ["help"], (0, 1), help_func))
 
-    name_to_command = {name: command for command in commands for name in command.names}
+    name_to_command = dict((name, command) for command in commands for name in command.names)
     main_usage = "Usage:\n" + "\n".join(command.parser.get_usage()[len("Usage: "):-len("\n")] for command in commands)
 
     def perform_bash_completion(args):
@@ -806,7 +806,7 @@ def command_line_main():
             except KeyError:
                 # bad command. can't help you.
                 return ()
-            name_to_option = {name: option for option in command.parser.option_list for name in itertools.chain(option._short_opts, option._long_opts)}
+            name_to_option = dict((name, option) for option in command.parser.option_list for name in itertools.chain(option._short_opts, option._long_opts))
             if word.startswith("-"):
                 # it's a switch
                 return name_to_option.keys()
