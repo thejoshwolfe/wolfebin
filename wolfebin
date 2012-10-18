@@ -649,13 +649,6 @@ def command_line_main():
             self.func = func
     commands = []
 
-    key_args = ["-k", "--key"]
-    key_kwargs = {"metavar": "KEY", "dest": "key", "help": \
-        "specifies an identifier to use for putting and getting. " + \
-        "getting with a specific key will get what was put with that key. " + \
-        "the default is \"\"."
-    }
-
     get_parser = optparse.OptionParser(usage="%(prog)s get [KEY...] [-o PATH]" % usage_variables, description=\
         "Download something. If KEY... is omitted, it defaults to \"\"."
     )
@@ -666,10 +659,14 @@ def command_line_main():
     )
     commands.append(Command(get_parser, ["get"], (0, float("inf")), get_func))
 
-    put_parser = optparse.OptionParser(usage="%(prog)s put [-k KEY] [-n NAME] file..." % usage_variables, description=\
+    put_parser = optparse.OptionParser(usage="%(prog)s [put] [-k KEY] [-n NAME] file..." % usage_variables, description=\
         "Upload something."
     )
-    put_parser.add_option(*key_args, **key_kwargs)
+    put_parser.add_option("-k", "--key", metavar="KEY", help=\
+        "use a special identifier to not override the default slot. " + \
+        "download it later using the same key. " + \
+        "if omitted, the default key is \"\"."
+    )
     put_parser.add_option("-n", "--name", metavar="NAME", dest="name_override", default="", help=\
         "name the file NAME when it is downloaded. " + \
         "the default uses the real name of the file. " + \
@@ -812,11 +809,20 @@ def command_line_main():
         return
 
     command_name = args[0]
+    command_is_a_file = os.path.exists(command_name)
     args = args[1:]
     try:
         command = name_to_command[command_name]
     except KeyError:
-        sys.exit("Unkown command: " + command_name + "\n\n" + main_usage)
+        if command_is_a_file:
+            # implied 'put' command
+            command = name_to_command["put"]
+            args = [command_name] + args
+        else:
+            sys.exit("ERROR: Unknown command, and not an existing path: " + command_name + "\n\n" + main_usage)
+    else:
+        if command_is_a_file:
+            sys.stderr.write("WARNING: interpreting \"%s\" as a command. use \"./%s\" to interpret as a path instead.\n" % (command_name, command_name))
     (options, args) = command.parser.parse_args(args)
     if len(args) < command.args_range[0] or len(args) > command.args_range[1]:
         sys.exit("Wrong number of arguments for command '" + command_name + "'.")

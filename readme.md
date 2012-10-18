@@ -18,7 +18,7 @@ wolfebin init
 To share/upload some files:
 
 ```
-wolfebin put files...
+wolfebin files...
 ```
 
 To download the shared files:
