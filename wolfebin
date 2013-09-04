@@ -664,7 +664,7 @@ _wolfebin()
     # Looks like we HAVE to use a temp file. Darn.
     # We have to check if the file is empty, or else we say there's a single
     # suggestion which is the empty string.
-    tmp=$(tempfile)
+    tmp=$(mktemp)
     wolfebin bash-completion "${COMP_POINT}" "${COMP_LINE}" "${COMP_KEY}" "${COMP_TYPE}" "${COMP_CWORD}" "${COMP_WORDS[@]}" > $tmp
     if [[ -s $tmp ]]; then
         readarray -t COMPREPLY < $tmp
