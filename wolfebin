@@ -14,6 +14,7 @@ if python_version == 2:
     bytes_to_str = lambda s: s
     str_to_bytes = lambda s: s
     coerce_unicode_to_str = lambda u: str(u) if type(u) == unicode else u
+    input = raw_input
 elif python_version == 3:
     from io import StringIO
     bytes_to_str = lambda s: str(s, "utf8")
@@ -635,14 +636,14 @@ def init_func():
         if config["server_name"] != "":
             previous_hostname = "(%s) " % config["server_name"]
         while True:
-            hostname = raw_input("enter the hostname or I.P. address of the server.\n%s> " % previous_hostname)
+            hostname = input("enter the hostname or I.P. address of the server.\n%s> " % previous_hostname)
             if hostname == "":
                 hostname = config["server_name"]
             if hostname != "":
                 break
         config["server_name"] = hostname
         save_config()
-        if not raw_input("test connection to %s?\n[Yn] " % hostname).lower().startswith("n"):
+        if not input("test connection to %s?\n[Yn] " % hostname).lower().startswith("n"):
             get_key_list()
             print("it works!")
     except KeyboardInterrupt:
