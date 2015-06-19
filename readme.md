@@ -66,3 +66,8 @@ This will create a config file and the database below `~/wolfebin_server`.
 
 As with all servers, you must know your public I.P. address or setup a dns
 redirect. Then you probably need to configure port forwarding on your router.
+
+License
+-------
+
+MIT
