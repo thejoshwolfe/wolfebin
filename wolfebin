@@ -510,7 +510,7 @@ def get_func(*keys, **kwargs):
         file_name = file_info["name"]
         file_size = file_info["size"]
         if output_is_stdout:
-            output_handle = sys.stdout
+            output_handle = open(sys.stdout.fileno(), "wb", closefd=False)
         else:
             if output_override != None:
                 # replace the first (possibly only) part with the override
@@ -533,8 +533,7 @@ def get_func(*keys, **kwargs):
             write_function = lambda chunk: output_handle.write(chunk)
             thus_far = progress_loop(read_function, write_function, thus_far, total_size, time_tracker, file_name)
         finally:
-            if output_handle != sys.stdout:
-                output_handle.close()
+            output_handle.close()
         if local_size[0] != file_size:
             # incomplete
             break
