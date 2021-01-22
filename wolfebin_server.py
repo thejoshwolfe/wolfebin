@@ -1,25 +1,12 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 import os, sys
 import struct, threading, time
 import hashlib
 import json
-import SocketServer
+import socketserver
 
-import imp
-sys.dont_write_bytecode = True
-try:
-    wolfebin_path = os.path.join(os.path.dirname(__file__), "wolfebin")
-    with open(wolfebin_path) as f:
-        wolfebin = imp.load_source("wolfebin", wolfebin_path, f)
-        f.seek(0)
-        wolfebin_source = f.read()
-    Connection = wolfebin.Connection
-    __version__ = wolfebin.__version__
-    default_port = wolfebin.default_port
-    chunk_size = wolfebin.chunk_size
-finally:
-    sys.dont_write_bytecode = False
+from wolfebin import Connection, __version__, default_port, chunk_size
 
 config_path = "config.json"
 current_config_version = 1
@@ -77,7 +64,7 @@ def find_session(key):
 def hash_to_file_name(key_hash):
     return os.path.join(file_data_dir, key_hash)
 def key_to_hash(key):
-    return hashlib.sha1(key).hexdigest()
+    return hashlib.sha1(key.encode("utf8")).hexdigest()
 def open_file(key_hash, mode):
     return open(hash_to_file_name(key_hash), mode)
 def delete_file(key_hash):
@@ -243,7 +230,7 @@ def put(connection, request):
                 connection.write_json({})
             else:
                 connection.write_warning("Checksum failed for {}".format(repr(file_info["name"])))
-            file_handle.write(checksum)
+            file_handle.write(checksum.encode("utf8"))
     finally:
         file_handle.close()
         session.done()
@@ -267,18 +254,21 @@ def delete(connection, request):
         connection.write_json({})
 
 def list_keys(connection):
-    database_items = get_database().items()
+    database_items = list(get_database().items())
     connection.write_json({
         "items": database_items,
     })
 
 def upgrade(connection):
+    wolfebin_path = os.path.join(os.path.dirname(__file__), "wolfebin")
+    with open(wolfebin_path) as f:
+        wolfebin_source = f.read()
     connection.write_json({
         "wolfebin": wolfebin_source,
     })
 
 def server_forever():
-    class ConnectionHandler(SocketServer.BaseRequestHandler):
+    class ConnectionHandler(socketserver.BaseRequestHandler):
         def handle(self):
             connection = Connection(self.request)
             request = connection.read_json()
@@ -299,7 +289,7 @@ def server_forever():
                 upgrade(connection)
             else:
                 connection.write_error("bad command: " + json.dumps(command))
-    class ThreadedTCPServer(SocketServer.ThreadingMixIn, SocketServer.TCPServer):
+    class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         allow_reuse_address = True
     server = ThreadedTCPServer((config["host_name"], config["port_number"]), ConnectionHandler)
     server.serve_forever()
