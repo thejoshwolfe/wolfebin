@@ -6,7 +6,7 @@ import hashlib
 import json
 import socketserver
 
-from wolfebin import Connection, __version__, default_port, chunk_size
+from wolfebin import Connection, default_port, chunk_size
 
 config_path = "config.json"
 current_config_version = 1
@@ -109,7 +109,7 @@ def get(connection, request):
                     break
                 # streaming buffer underflow. pause a moment and try again.
                 time.sleep(0.1)
-            return "".join(chunks)
+            return b"".join(chunks)
 
         for file_info in entry["files"]:
             file_size = file_info["size"]
@@ -121,7 +121,7 @@ def get(connection, request):
                     return
                 connection.write_binary_chunk(chunk)
                 written_size += len(chunk)
-            checksum = read_from_the_file(len(hashlib.sha1().hexdigest()))
+            checksum = read_from_the_file(len(hashlib.sha1().hexdigest())).decode("utf8")
             connection.write_json({
                 "sha1": checksum,
             })
